@@ -6,6 +6,15 @@ import re
 import time
 import random
 
+"""
+Guidecom 상품 검색/파싱 모듈 (app.py 수정 없이 사용)
+- 요구사항: 낮은가격 3 + 인기상품 4 + 행사상품 3 = 총 10개, 중복 없이 반환
+- 페이지 구조(실측):
+  * <div id="goods-placeholder"><div id="goods-list"> ... <div class="goods-row"> ...
+  * 상품명: .desc > h4.title > a > span.goodsname1
+  * 가격:   .prices > .price-large > span
+"""
+
 @dataclass
 class Product:
     name: str
@@ -13,20 +22,13 @@ class Product:
     specifications: str
 
 class GuidecomParser:
-    """
-    Guidecom 상품 검색 파서
-    - 검색 페이지: https://www.guidecom.co.kr/search/index.html
-    - 정렬 파라미터:
-        * 낮은가격  -> order=price_0
-        * 인기상품  -> order=reco_goods
-        * 행사상품  -> order=event_goods
-    """
     def __init__(self) -> None:
+        # /search/ 와 /search/index.html 모두 동작. index.html을 기본으로 사용
         self.base_url = "https://www.guidecom.co.kr/search/index.html"
         self.alternative_urls = [
             "https://www.guidecom.co.kr/search/",
             "https://www.guidecom.co.kr/shop/search.html",
-            "https://www.guidecom.co.kr/shop/"
+            "https://www.guidecom.co.kr/shop/",
         ]
         self.session = requests.Session()
         self.last_request_time = 0.0
@@ -34,7 +36,6 @@ class GuidecomParser:
 
     # ----------------------- Session helpers -----------------------
     def _setup_session(self) -> None:
-        # 베이직 헤더
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
@@ -48,7 +49,6 @@ class GuidecomParser:
         })
 
     def _update_headers(self) -> None:
-        # 가벼운 헤더 변조로 간단한 방어 우회
         self.session.headers.update({
             "User-Agent": random.choice(self.user_agents),
             "Cache-Control": random.choice(["no-cache", "max-age=0"]),
@@ -73,7 +73,7 @@ class GuidecomParser:
                 if attempt > 0:
                     time.sleep(self._get_random_delay(1.5, 3.0))
                 resp = self.session.get(url, params=params, timeout=20, allow_redirects=True)
-                # 인코딩 보정(EUC-KR/ISO-8859-1 등)
+                # 인코딩(EUC-KR/ISO-8859-1) 보정
                 try:
                     if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "utf-8"):
                         resp.encoding = resp.apparent_encoding or resp.encoding
@@ -87,33 +87,34 @@ class GuidecomParser:
 
     # ----------------------- Parsing helpers -----------------------
     def _find_goods_list(self, soup: BeautifulSoup):
+        # 1순위: 정확 id
         gl = soup.find(id="goods-list")
         if gl:
             return gl
-        # 일부 페이지에서 placeholder만 먼저 노출되기도 함
+        # 2순위: placeholder 내부
         placeholder = soup.find(id="goods-placeholder")
         if placeholder:
             inner = placeholder.find(id="goods-list")
             if inner:
                 return inner
-        # 마지막으로 클래스 기반 탐색
+        # 3순위: 유사 id
         return soup.find("div", {"id": re.compile(r"^goods-list$")})
 
     def _extract_text(self, el) -> str:
         return el.get_text(" ", strip=True) if el else ""
 
     def _parse_price(self, text: str) -> str:
-        # "46,010원" 혹은 "46,010" 형태 처리
-        t = re.sub(r"[^\d]", "", text or "")
-        if not t:
+        digits = re.sub(r"[^\d]", "", text or "")
+        if not digits:
             return ""
-        # 천단위 콤마 + 원
-        return f"{int(t):,}원"
+        return f"{int(digits):,}원"
 
     def _parse_product_item(self, row) -> Optional[Product]:
         try:
-            # 이름
-            name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+            # 이름: goodsname1을 우선 사용
+            name_el = row.select_one(".desc .goodsname1")
+            if not name_el:
+                name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
             name = self._extract_text(name_el)
             if not name:
                 return None
@@ -130,7 +131,7 @@ class GuidecomParser:
     # ----------------------- Manufacturer helpers -----------------------
     def _normalize_brand(self, text: str) -> str:
         t = (text or "").lower()
-        t = re.sub(r"[\\s._/-]+", " ", t).strip()
+        t = re.sub(r"[\s._/-]+", " ", t).strip()
         aliases = {
             "wd": "western digital",
             "웨스턴 디지털": "western digital",
@@ -141,13 +142,14 @@ class GuidecomParser:
             "삼성": "삼성전자",
             "samsung": "삼성전자",
             "g skill": "gskill",
+            "tp-link": "tp link",
         }
         return aliases.get(t, t)
 
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:
         if not product_name:
             return None
-        # [307842] 같은 코드 제거
+        # [코드] 제거 + 공백 정리
         text = re.sub(r"\[[^\]]+\]", " ", product_name)
         text = re.sub(r"\s+", " ", text).strip()
         words = text.split()
@@ -160,15 +162,17 @@ class GuidecomParser:
         if i >= len(words):
             return None
         manufacturer = words[i]
-        # Western Digital 두 단어 결합
+        # 2단어 브랜드 결합(Western Digital, TP LINK 등)
         if i + 1 < len(words):
             pair = f"{manufacturer} {words[i+1]}"
-            if self._normalize_brand(pair) == "western digital":
+            if self._normalize_brand(pair) in {"western digital", "tp link"}:
                 manufacturer = pair
         return manufacturer
 
     def _extract_manufacturer_from_row(self, row) -> Optional[str]:
-        name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+        name_el = row.select_one(".desc .goodsname1")
+        if not name_el:
+            name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
         name = self._extract_text(name_el)
         return self._extract_manufacturer(name)
 
@@ -192,6 +196,7 @@ class GuidecomParser:
             ("gigabyte", ["기가바이트"]),
             ("zotac", ["조텍"]),
             ("nvidia", ["엔비디아"]),
+            ("tp link", ["tp-link"]),
         ]
         for canonical, aliases in brand_pairs:
             if man_norm == canonical and any(a == sel for sel in sel_norms for a in aliases):
@@ -203,8 +208,8 @@ class GuidecomParser:
     # ----------------------- Public API -----------------------
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
-        검색 키워드로 1페이지를 스캔하여 제조사 후보를 최대 8개까지 반환합니다.
-        반환: [{"name": "...", "code": "..."}, ...]
+        검색 키워드로 1페이지를 스캔하여 제조사 후보를 최대 8개까지 반환.
+        반환: [{"name": "...", "code": "..."}]
         """
         try:
             params = {"keyword": keyword}
@@ -224,30 +229,35 @@ class GuidecomParser:
                         continue
             if not goods_list:
                 return []
-            manufacturers = []
-            seen = set()
+
             rows = goods_list.find_all("div", class_="goods-row")
-            for row in rows[:60]:
+            manufacturers: List[str] = []
+            seen = set()
+            for row in rows[:80]:
                 maker = self._extract_manufacturer_from_row(row)
-                if maker:
-                    if maker not in seen:
-                        manufacturers.append(maker)
-                        seen.add(maker)
+                if not maker:
+                    continue
+                if maker in seen:
+                    continue
+                manufacturers.append(maker)
+                seen.add(maker)
                 if len(manufacturers) >= 8:
                     break
-            # 보기 좋게 정렬(한글 우선)
+
+            if not manufacturers:
+                return []
+
             def sort_key(x: str):
                 xn = self._normalize_brand(x)
                 return (0 if re.search(r"[가-힣]", x) else 1, xn)
-            result = [{"name": m, "code": self._normalize_brand(m).replace(" ", "_")} for m in sorted(manufacturers, key=sort_key)]
-            return result
+
+            return [{"name": m, "code": self._normalize_brand(m).replace(" ", "_")} for m in sorted(manufacturers, key=sort_key)]
         except Exception:
             return []
 
     def _resolve_order_param(self, sort_type: str) -> str:
         """
         들어온 sort_type을 guidecom의 order 파라미터로 변환합니다.
-        허용 입력 예:
           - 'price_0' / '낮은가격' / 'priceASC'
           - 'reco_goods' / '인기상품' / 'opinionDESC'
           - 'event_goods' / '행사상품' / 'saveDESC'
@@ -295,9 +305,7 @@ class GuidecomParser:
 
     def get_unique_products(self, keyword: str, maker_codes: List[str]) -> List[Product]:
         """
-        요구사항:
-        - 낮은가격 3개 + 인기상품 4개 + 행사상품 3개 = 총 10개
-        - 전부 중복 없이
+        낮은가격 3개 + 인기상품 4개 + 행사상품 3개 = 총 10개(중복 제거)
         """
         buckets: List[Tuple[str, int]] = [
             ("price_0", 3),     # 낮은가격
@@ -308,17 +316,15 @@ class GuidecomParser:
         seen_names = set()
 
         for order, want in buckets:
-            # 충분히 많이 가져와서 중복 제외 후 quota를 맞춘다
-            candidates = self.search_products(keyword, order, maker_codes, limit=30)
-            taken = 0
+            # 충분히 많이 가져와서 중복 제외 후 quota 맞추기
+            candidates = self.search_products(keyword, order, maker_codes, limit=40)
+            took = 0
             for p in candidates:
                 if p.name in seen_names:
                     continue
                 results.append(p)
                 seen_names.add(p.name)
-                taken += 1
-                if taken >= want:
+                took += 1
+                if took >= want:
                     break
-
-        # 최종 10개(부족하면 있는 만큼 반환)
         return results[:10]

@@ -171,7 +171,7 @@ class GuidecomParser:
     def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
         """
         가이드컴에서 제품을 검색합니다.
-        dibugguid.txt 기반 URL과 정렬 옵션 사용
+        가이드컴은 제조사별 API 필터링이 없으므로 클라이언트 사이드에서 필터링
         """
         try:
             # dibugguid.txt 기준 정렬 매핑
@@ -201,13 +201,38 @@ class GuidecomParser:
             if not goods_list:
                 return []
 
-            # 모든 goods-row 찾기
+            # 더 많은 제품을 가져와서 필터링할 여지를 늘림 (최대 50개)
             goods_rows = goods_list.find_all('div', class_='goods-row')
             
-            for row in goods_rows[:limit]:
+            filtered_count = 0
+            total_processed = 0
+            
+            print(f"DEBUG: 선택된 제조사 코드: {maker_codes}")
+            print(f"DEBUG: 총 제품 수: {len(goods_rows)}")
+            
+            for row in goods_rows:
+                if filtered_count >= limit:
+                    break
+                    
                 product = self._parse_product_item(row)
-                if product and self._filter_by_maker(product, maker_codes):
-                    products.append(product)
+                if product:
+                    total_processed += 1
+                    extracted_manufacturer = self._extract_manufacturer(product.name)
+                    
+                    # 제조사 필터링 적용
+                    is_match = self._filter_by_maker(product, maker_codes)
+                    
+                    if total_processed <= 5:  # 처음 5개만 디버깅
+                        print(f"DEBUG: 제품 {total_processed}: {product.name[:50]}...")
+                        print(f"DEBUG: 추출된 제조사: {extracted_manufacturer}")
+                        print(f"DEBUG: 필터링 결과: {is_match}")
+                    
+                    if is_match:
+                        products.append(product)
+                        filtered_count += 1
+            
+            print(f"DEBUG: 처리된 제품 수: {total_processed}")
+            print(f"DEBUG: 필터링된 제품 수: {filtered_count}")
                     
             return products
             
@@ -216,7 +241,11 @@ class GuidecomParser:
             return []
     
     def _filter_by_maker(self, product: Product, maker_codes: List[str]) -> bool:
-        """제조사 코드로 제품을 필터링합니다."""
+        """
+        제조사 코드로 제품을 필터링합니다.
+        가이드컴 특성: 제품명의 첫 단어와 선택된 제조사를 매칭
+        """
+        # 제조사가 선택되지 않았으면 모든 제품 통과
         if not maker_codes:
             return True
             
@@ -224,10 +253,62 @@ class GuidecomParser:
         manufacturer = self._extract_manufacturer(product.name)
         if not manufacturer:
             return False
+        
+        # 제조사 코드 생성 (공백, 점 제거)
+        manufacturer_code = manufacturer.lower().replace(' ', '_').replace('.', '')
+        
+        # 선택된 제조사 코드들과 비교
+        for selected_code in maker_codes:
+            selected_code_clean = selected_code.lower().replace(' ', '_').replace('.', '')
             
-        # 제조사가 선택된 코드 목록에 있는지 확인
-        manufacturer_code = manufacturer.lower().replace(' ', '_')
-        return manufacturer_code in maker_codes
+            # 정확한 매칭
+            if manufacturer_code == selected_code_clean:
+                return True
+            
+            # 부분 매칭 (예: 삼성전자 vs 삼성)
+            if manufacturer_code in selected_code_clean or selected_code_clean in manufacturer_code:
+                return True
+            
+            # 브랜드 별칭 확인 (예: 삼성전자 = samsung)
+            if self._check_brand_alias(manufacturer, selected_code):
+                return True
+        
+        return False
+    
+    def _check_brand_alias(self, manufacturer: str, selected_code: str) -> bool:
+        """브랜드 별칭을 확인합니다"""
+        manufacturer_lower = manufacturer.lower()
+        selected_lower = selected_code.lower()
+        
+        # 한글-영문 매칭
+        brand_mapping = {
+            '삼성전자': ['samsung', 'samsung전자'],
+            '인텔': ['intel'],
+            'amd': ['amd'],
+            'nvidia': ['nvidia', '엔비디아'],
+            'msi': ['msi'],
+            'asus': ['asus', '에이수스'],
+            '기가바이트': ['gigabyte', 'gb'],
+            'evga': ['evga'],
+            'zotac': ['zotac', '조택'],
+            'sapphire': ['sapphire', '사파이어'],
+            'wd': ['wd', 'western', 'digital'],
+            'crucial': ['crucial', '크루셜'],
+            'kingston': ['kingston', '킹스톤'],
+            'corsair': ['corsair', '커세어'],
+            'g.skill': ['gskill', 'g_skill']
+        }
+        
+        # 제조사가 매핑에 있는지 확인
+        for brand, aliases in brand_mapping.items():
+            if brand in manufacturer_lower:
+                if any(alias in selected_lower for alias in aliases):
+                    return True
+            if brand in selected_lower:
+                if any(alias in manufacturer_lower for alias in aliases):
+                    return True
+        
+        return False
 
     def _parse_product_item(self, goods_row) -> Optional[Product]:
         """

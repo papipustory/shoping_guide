@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
+from urllib.parse import quote_plus
 import re
 import time
 import random
@@ -9,10 +10,10 @@ import random
 """
 Guidecom 상품 검색/파싱 모듈 (app.py 수정 없이 사용)
 - 요구사항: 낮은가격 3 + 인기상품 4 + 행사상품 3 = 총 10개, 중복 없이 반환
-- 페이지 구조(실측):
-  * <div id="goods-placeholder"><div id="goods-list"> ... <div class="goods-row"> ...
-  * 상품명: .desc > h4.title > a > span.goodsname1
-  * 가격:   .prices > .price-large > span
+- 검색 엔드포인트 2가지 모두 지원
+  1) GET  https://www.guidecom.co.kr/search/index.html?keyword=...&order=...
+  2) POST https://www.guidecom.co.kr/search/list.php (keyword/order/lpp/page)
+- 실제 리스트는 list.php가 반환하는 HTML 조각(여러 개의 <div class="goods-row">)에 있음
 """
 
 @dataclass
@@ -23,8 +24,8 @@ class Product:
 
 class GuidecomParser:
     def __init__(self) -> None:
-        # /search/ 와 /search/index.html 모두 동작. index.html을 기본으로 사용
         self.base_url = "https://www.guidecom.co.kr/search/index.html"
+        self.list_url = "https://www.guidecom.co.kr/search/list.php"
         self.alternative_urls = [
             "https://www.guidecom.co.kr/search/",
             "https://www.guidecom.co.kr/shop/search.html",
@@ -54,7 +55,7 @@ class GuidecomParser:
             "Cache-Control": random.choice(["no-cache", "max-age=0"]),
         })
 
-    def _get_random_delay(self, a: float = 0.4, b: float = 1.1) -> float:
+    def _get_random_delay(self, a: float = 0.35, b: float = 0.9) -> float:
         return random.uniform(a, b)
 
     def _wait_between_requests(self, min_gap: float = 0.25) -> None:
@@ -64,6 +65,13 @@ class GuidecomParser:
             time.sleep(min_gap - delta)
         self.last_request_time = time.time()
 
+    def _fix_encoding(self, resp: requests.Response) -> None:
+        try:
+            if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "utf-8"):
+                resp.encoding = resp.apparent_encoding or resp.encoding
+        except Exception:
+            pass
+
     def _make_request(self, url: str, params: Optional[Dict[str, str]] = None, retries: int = 3) -> requests.Response:
         last_exc = None
         for attempt in range(retries):
@@ -71,34 +79,44 @@ class GuidecomParser:
                 self._update_headers()
                 self._wait_between_requests()
                 if attempt > 0:
-                    time.sleep(self._get_random_delay(1.5, 3.0))
+                    time.sleep(self._get_random_delay(1.2, 2.2))
                 resp = self.session.get(url, params=params, timeout=20, allow_redirects=True)
-                # 인코딩(EUC-KR/ISO-8859-1) 보정
-                try:
-                    if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "utf-8"):
-                        resp.encoding = resp.apparent_encoding or resp.encoding
-                except Exception:
-                    pass
-                if resp.status_code == 200 and len(resp.text) > 500:
+                self._fix_encoding(resp)
+                if resp.status_code == 200 and len(resp.text) > 300:
                     return resp
             except requests.RequestException as e:
                 last_exc = e
         raise last_exc if last_exc else RuntimeError("요청 실패")
 
+    def _post_list(self, keyword: str, order: str, page: int = 1, lpp: int = 30) -> Optional[BeautifulSoup]:
+        """list.php로 직접 POST하여 goods-row HTML 조각을 받는다."""
+        try:
+            self._update_headers()
+            self._wait_between_requests()
+            referer = f"https://www.guidecom.co.kr/search/?keyword={quote_plus(keyword)}&order={order}"
+            headers = {"Referer": referer}
+            data = {"keyword": keyword, "order": order, "lpp": lpp, "page": page, "y": 0}
+            resp = self.session.post(self.list_url, data=data, headers=headers, timeout=20)
+            self._fix_encoding(resp)
+            if resp.status_code == 200 and len(resp.text) > 100:
+                return BeautifulSoup(resp.text, "lxml")
+        except requests.RequestException:
+            return None
+        return None
+
     # ----------------------- Parsing helpers -----------------------
     def _find_goods_list(self, soup: BeautifulSoup):
-        # 1순위: 정확 id
+        # GET 페이지용 래퍼 탐색
         gl = soup.find(id="goods-list")
         if gl:
             return gl
-        # 2순위: placeholder 내부
         placeholder = soup.find(id="goods-placeholder")
         if placeholder:
             inner = placeholder.find(id="goods-list")
             if inner:
                 return inner
-        # 3순위: 유사 id
-        return soup.find("div", {"id": re.compile(r"^goods-list$")})
+        # list.php 응답은 래퍼 없이 goods-row만 내려올 수 있으므로 soup 자체를 반환
+        return soup
 
     def _extract_text(self, el) -> str:
         return el.get_text(" ", strip=True) if el else ""
@@ -111,7 +129,7 @@ class GuidecomParser:
 
     def _parse_product_item(self, row) -> Optional[Product]:
         try:
-            # 이름: goodsname1을 우선 사용
+            # 이름: goodsname1을 우선, 없으면 a 텍스트 사용
             name_el = row.select_one(".desc .goodsname1")
             if not name_el:
                 name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
@@ -149,7 +167,6 @@ class GuidecomParser:
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:
         if not product_name:
             return None
-        # [코드] 제거 + 공백 정리
         text = re.sub(r"\[[^\]]+\]", " ", product_name)
         text = re.sub(r"\s+", " ", text).strip()
         words = text.split()
@@ -184,11 +201,9 @@ class GuidecomParser:
             return False
         man_norm = self._normalize_brand(manufacturer)
         sel_norms = [self._normalize_brand(code.replace("_", " ")) for code in maker_codes]
-        # 직접 일치 또는 포함
         for sel in sel_norms:
             if man_norm == sel or man_norm in sel or sel in man_norm:
                 return True
-        # 추가 별칭 쌍
         brand_pairs = [
             ("western digital", ["wd", "western", "digital"]),
             ("삼성전자", ["samsung", "삼성"]),
@@ -208,44 +223,32 @@ class GuidecomParser:
     # ----------------------- Public API -----------------------
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
-        검색 키워드로 1페이지를 스캔하여 제조사 후보를 최대 8개까지 반환.
-        반환: [{"name": "...", "code": "..."}]
+        제조사 후보를 최대 8개까지 반환.
+        1) list.php POST 결과에서 우선 추출
+        2) 실패 시 검색 페이지(GET)에서 보조 추출
         """
+        manufacturers: List[str] = []
+        seen = set()
         try:
-            params = {"keyword": keyword}
-            resp = self._make_request(self.base_url, params=params)
-            soup = BeautifulSoup(resp.text, "lxml")
-            goods_list = self._find_goods_list(soup)
-            if not goods_list:
-                # 대체 URL 시도
-                for alt in self.alternative_urls:
-                    try:
-                        resp2 = self._make_request(alt, params=params)
-                        soup2 = BeautifulSoup(resp2.text, "lxml")
-                        goods_list = self._find_goods_list(soup2)
-                        if goods_list:
-                            break
-                    except Exception:
-                        continue
-            if not goods_list:
-                return []
+            # 1) list.php로 바로 가져오기 (인기상품 기준이 가장 일반적)
+            soup = self._post_list(keyword, order="reco_goods", page=1, lpp=30)
+            rows = soup.find_all("div", class_="goods-row") if soup else []
+            # 2) 보조: GET 페이지에서 탐색
+            if not rows:
+                params = {"keyword": keyword}
+                resp = self._make_request(self.base_url, params=params)
+                soup2 = BeautifulSoup(resp.text, "lxml")
+                container = self._find_goods_list(soup2)
+                rows = container.find_all("div", class_="goods-row") if container else []
 
-            rows = goods_list.find_all("div", class_="goods-row")
-            manufacturers: List[str] = []
-            seen = set()
             for row in rows[:80]:
                 maker = self._extract_manufacturer_from_row(row)
-                if not maker:
-                    continue
-                if maker in seen:
+                if not maker or maker in seen:
                     continue
                 manufacturers.append(maker)
                 seen.add(maker)
                 if len(manufacturers) >= 8:
                     break
-
-            if not manufacturers:
-                return []
 
             def sort_key(x: str):
                 xn = self._normalize_brand(x)
@@ -256,12 +259,6 @@ class GuidecomParser:
             return []
 
     def _resolve_order_param(self, sort_type: str) -> str:
-        """
-        들어온 sort_type을 guidecom의 order 파라미터로 변환합니다.
-          - 'price_0' / '낮은가격' / 'priceASC'
-          - 'reco_goods' / '인기상품' / 'opinionDESC'
-          - 'event_goods' / '행사상품' / 'saveDESC'
-        """
         mapping = {
             "price_0": "price_0",
             "낮은가격": "price_0",
@@ -277,18 +274,19 @@ class GuidecomParser:
         return mapping.get(k, "reco_goods")
 
     def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
-        """
-        단일 정렬 기준으로 상품을 최대 `limit`개까지 반환합니다.
-        """
+        """단일 정렬 기준으로 제품 최대 `limit`개 반환 (list.php 우선)."""
         try:
             order = self._resolve_order_param(sort_type)
-            params = {"keyword": keyword, "order": order}
-            resp = self._make_request(self.base_url, params=params)
-            soup = BeautifulSoup(resp.text, "lxml")
-            goods_list = self._find_goods_list(soup)
-            if not goods_list:
-                return []
-            rows = goods_list.find_all("div", class_="goods-row")
+            # 1) list.php 시도
+            soup = self._post_list(keyword, order=order, page=1, lpp=40)
+            rows = soup.find_all("div", class_="goods-row") if soup else []
+            # 2) 실패 시 GET 페이지에서 보조
+            if not rows:
+                params = {"keyword": keyword, "order": order}
+                resp = self._make_request(self.base_url, params=params)
+                soup2 = BeautifulSoup(resp.text, "lxml")
+                container = self._find_goods_list(soup2)
+                rows = container.find_all("div", class_="goods-row") if container else []
             out: List[Product] = []
             for row in rows:
                 p = self._parse_product_item(row)
@@ -304,9 +302,7 @@ class GuidecomParser:
             return []
 
     def get_unique_products(self, keyword: str, maker_codes: List[str]) -> List[Product]:
-        """
-        낮은가격 3개 + 인기상품 4개 + 행사상품 3개 = 총 10개(중복 제거)
-        """
+        """낮은가격 3 + 인기상품 4 + 행사상품 3 = 총 10개(중복 제거)."""
         buckets: List[Tuple[str, int]] = [
             ("price_0", 3),     # 낮은가격
             ("reco_goods", 4),  # 인기상품
@@ -316,8 +312,7 @@ class GuidecomParser:
         seen_names = set()
 
         for order, want in buckets:
-            # 충분히 많이 가져와서 중복 제외 후 quota 맞추기
-            candidates = self.search_products(keyword, order, maker_codes, limit=40)
+            candidates = self.search_products(keyword, order, maker_codes, limit=50)
             took = 0
             for p in candidates:
                 if p.name in seen_names:

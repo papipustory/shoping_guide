@@ -43,17 +43,30 @@ class GuidecomParser:
             manufacturers = set()
             
             # 실제 HTML 응답 일부 출력 (디버깅용)
-            print(f"DEBUG: 응답 URL: {response.url}")
-            print(f"DEBUG: 응답 길이: {len(response.text)}")
-            print(f"DEBUG: HTML 일부 (처음 500자):")
-            print(response.text[:500])
-            print(f"DEBUG: HTML 일부 (중간 500자):")
-            print(response.text[len(response.text)//2:len(response.text)//2+500])
+            try:
+                import streamlit as st
+                st.write(f"🔍 DEBUG: 응답 URL: {response.url}")
+                st.write(f"📏 DEBUG: 응답 길이: {len(response.text)}")
+                st.write(f"📝 DEBUG: HTML 일부 (처음 500자):")
+                st.code(response.text[:500])
+                st.write(f"📝 DEBUG: HTML 일부 (중간 500자):")
+                st.code(response.text[len(response.text)//2:len(response.text)//2+500])
+            except:
+                print(f"DEBUG: 응답 URL: {response.url}")
+                print(f"DEBUG: 응답 길이: {len(response.text)}")
+                print(f"DEBUG: HTML 일부 (처음 500자):")
+                print(response.text[:500])
+                print(f"DEBUG: HTML 일부 (중간 500자):")
+                print(response.text[len(response.text)//2:len(response.text)//2+500])
             
             # 1단계: goods-list 찾기
             goods_list = self._find_goods_list(soup)
             if not goods_list:
-                print("DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
+                try:
+                    import streamlit as st
+                    st.error("❌ DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
+                except:
+                    print("DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
                 return []
             
             # 2단계: goods-row들에서 제품명 추출
@@ -79,12 +92,20 @@ class GuidecomParser:
     
     def _find_goods_list(self, soup):
         """모바일 버전에서 제품 리스트를 찾습니다"""
-        print(f"DEBUG: HTML 구조 분석 중...")
+        try:
+            import streamlit as st
+            st.write("🔍 DEBUG: HTML 구조 분석 중...")
+        except:
+            print(f"DEBUG: HTML 구조 분석 중...")
         
         # 1. 기존 데스크톱 구조 시도
         goods_list = soup.find('div', id='goods-list')
         if goods_list:
-            print(f"DEBUG: 데스크톱 구조 goods-list 찾음")
+            try:
+                import streamlit as st
+                st.success("✅ DEBUG: 데스크톱 구조 goods-list 찾음")
+            except:
+                print(f"DEBUG: 데스크톱 구조 goods-list 찾음")
             return goods_list
         
         # 2. goods-placeholder 내부에서 찾기
@@ -92,7 +113,11 @@ class GuidecomParser:
         if goods_placeholder:
             goods_list = goods_placeholder.find('div', id='goods-list')
             if goods_list:
-                print(f"DEBUG: goods-placeholder 내 goods-list 찾음")
+                try:
+                    import streamlit as st
+                    st.success("✅ DEBUG: goods-placeholder 내 goods-list 찾음")
+                except:
+                    print(f"DEBUG: goods-placeholder 내 goods-list 찾음")
                 return goods_list
         
         # 3. 모바일 버전 가능한 구조들 찾기
@@ -117,18 +142,37 @@ class GuidecomParser:
         
         for container in possible_containers:
             if container:
-                print(f"DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
+                try:
+                    import streamlit as st
+                    st.success(f"✅ DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
+                except:
+                    print(f"DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
                 return container
         
         # 4. 모든 div들 중 제품이 있을 만한 것들 찾기
         all_divs = soup.find_all('div')
-        print(f"DEBUG: 총 div 개수: {len(all_divs)}")
-        
-        for div in all_divs:
-            if div.get('class'):
-                class_name = ' '.join(div.get('class'))
-                if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
-                    print(f"DEBUG: 가능한 컨테이너: div.{class_name}")
+        try:
+            import streamlit as st
+            st.warning(f"⚠️ DEBUG: 총 div 개수: {len(all_divs)}")
+            
+            possible_divs = []
+            for div in all_divs:
+                if div.get('class'):
+                    class_name = ' '.join(div.get('class'))
+                    if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
+                        possible_divs.append(f"div.{class_name}")
+            
+            if possible_divs:
+                st.write("🔍 DEBUG: 가능한 컨테이너들:")
+                for div_info in possible_divs:
+                    st.write(f"- {div_info}")
+        except:
+            print(f"DEBUG: 총 div 개수: {len(all_divs)}")
+            for div in all_divs:
+                if div.get('class'):
+                    class_name = ' '.join(div.get('class'))
+                    if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
+                        print(f"DEBUG: 가능한 컨테이너: div.{class_name}")
         
         return None
     

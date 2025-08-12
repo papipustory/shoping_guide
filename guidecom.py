@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
 from typing import List, Dict, Optional
+import re
 
 @dataclass
 class Product:
@@ -15,94 +16,139 @@ class GuidecomParser:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
+        # dibugguid.txt 기준 URL
         self.base_url = "https://www.guidecom.co.kr/search/index.html"
 
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
-        가이드컴에서 제품을 검색하여 제조사 정보를 추출합니다.
-        제품명의 첫 단어를 제조사로 사용 (공식인증, 병행수입 제외)
-        최대 8개의 제조사를 중복 없이 반환합니다.
+        가이드컴에서 실제 제품을 검색하여 제조사 정보를 추출합니다.
+        dibugguid.txt와 goods.txt 구조에 최적화
         """
         try:
-            # 검색하여 제품 목록 가져오기 (dibugguid.txt 기준)
+            # dibugguid.txt 기준: https://www.guidecom.co.kr/search/index.html?keyword=검색어
             params = {'keyword': keyword}
             response = self.session.get(self.base_url, params=params)
             response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
             
+            soup = BeautifulSoup(response.text, 'html.parser')
             manufacturers = set()
             
-            # 우선 간단한 테스트: 실제 사이트 접근이 안 될 수도 있으니 
-            # 임시로 몇 개 제조사를 반환해서 앱이 작동하는지 확인
-            if keyword:
-                # 검색어에 따른 일반적인 제조사들
-                common_manufacturers = {
-                    'ssd': ['삼성전자', 'WD', 'Crucial', 'Kingston'],
-                    '그래픽카드': ['NVIDIA', 'AMD', 'MSI', 'ASUS'],
-                    'cpu': ['인텔', 'AMD'],
-                    '메모리': ['삼성전자', 'SK하이닉스', 'Corsair', 'G.SKILL'],
-                    'ram': ['삼성전자', 'SK하이닉스', 'Corsair', 'G.SKILL']
-                }
-                
-                keyword_lower = keyword.lower()
-                for key, brands in common_manufacturers.items():
-                    if key in keyword_lower:
-                        for brand in brands:
-                            manufacturers.add(brand)
+            # goods.txt 구조 분석:
+            # <div id="goods-placeholder">
+            #   <div id="goods-list">
+            #     <div class="goods-row">
+            #       <div class="desc">
+            #         <h4 class="title">
+            #           <span class="goodsname1">제품명</span>
+            
+            # 1단계: goods-list 찾기
+            goods_list = self._find_goods_list(soup)
+            if not goods_list:
+                # 사이트 접근 실패시 키워드 기반 제조사 반환
+                return self._get_keyword_based_manufacturers(keyword)
+            
+            # 2단계: goods-row들에서 제품명 추출
+            goods_rows = goods_list.find_all('div', class_='goods-row')
+            if not goods_rows:
+                return self._get_keyword_based_manufacturers(keyword)
+            
+            # 3단계: 각 제품에서 제조사 추출 (최대 20개 제품 확인)
+            for row in goods_rows[:20]:
+                manufacturer = self._extract_manufacturer_from_row(row)
+                if manufacturer:
+                    manufacturers.add(manufacturer)
+                    # 최대 8개 제조사로 제한
+                    if len(manufacturers) >= 8:
                         break
-                
-                # 기본 제조사들 (검색어와 상관없이)
-                if not manufacturers:
-                    manufacturers.update(['삼성전자', 'LG', 'SK하이닉스', 'AMD'])
             
-            # 실제 사이트에서 제조사 추출 시도 (나중에 작동하면 위의 임시 코드 제거)
-            try:
-                # div id="goods-list" 에서 제품 찾기
-                goods_list = soup.find('div', id='goods-list')
-                
-                if not goods_list:
-                    # goods.txt와 비교해서 다른 구조 시도
-                    goods_placeholder = soup.find('div', id='goods-placeholder')
-                    if goods_placeholder:
-                        goods_list = goods_placeholder.find('div', id='goods-list')
-                
-                if goods_list:
-                    # 모든 goods-row 찾기
-                    goods_rows = goods_list.find_all('div', class_='goods-row')
-                    
-                    for row in goods_rows[:10]:  # 최대 10개 제품만 확인
-                        # span class="goodsname1"에서 제품명 추출
-                        goodsname_span = row.find('span', class_='goodsname1')
-                        
-                        if goodsname_span:
-                            # highlight 태그 제거하고 텍스트만 추출
-                            product_name = goodsname_span.get_text(strip=True)
-                            manufacturer = self._extract_manufacturer(product_name)
-                            
-                            if manufacturer:
-                                manufacturers.add(manufacturer)
-                                
-                                # 최대 8개 제한
-                                if len(manufacturers) >= 8:
-                                    break
-            except Exception as parse_error:
-                print(f"실시간 파싱 오류 (임시 데이터 사용): {parse_error}")
+            # 4단계: 제조사 목록이 비어있으면 키워드 기반으로 대체
+            if not manufacturers:
+                return self._get_keyword_based_manufacturers(keyword)
             
-            # 제조사 목록을 알파벳순으로 정렬하여 반환
-            manufacturer_list = []
-            for manufacturer in sorted(manufacturers):
-                manufacturer_list.append({
-                    'name': manufacturer,
-                    'code': manufacturer.lower().replace(' ', '_')
-                })
-            
-            return manufacturer_list
+            # 5단계: 제조사 목록을 정렬하여 반환
+            return self._format_manufacturer_list(manufacturers)
             
         except Exception as e:
-            print(f"An error occurred while fetching search options: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"검색 옵션 가져오기 오류: {e}")
+            # 오류 발생시 키워드 기반 제조사 반환
+            return self._get_keyword_based_manufacturers(keyword)
+    
+    def _find_goods_list(self, soup):
+        """goods-list div를 찾습니다 (goods.txt 구조 기준)"""
+        # 직접 찾기
+        goods_list = soup.find('div', id='goods-list')
+        if goods_list:
+            return goods_list
+        
+        # goods-placeholder 내부에서 찾기
+        goods_placeholder = soup.find('div', id='goods-placeholder')
+        if goods_placeholder:
+            return goods_placeholder.find('div', id='goods-list')
+        
+        return None
+    
+    def _extract_manufacturer_from_row(self, row):
+        """goods-row에서 제조사를 추출합니다"""
+        try:
+            # goods.txt 구조: div.desc > h4.title > span.goodsname1
+            desc_div = row.find('div', class_='desc')
+            if not desc_div:
+                return None
+            
+            title_h4 = desc_div.find('h4', class_='title')
+            if not title_h4:
+                return None
+            
+            goodsname_span = title_h4.find('span', class_='goodsname1')
+            if not goodsname_span:
+                return None
+            
+            # 제품명에서 제조사 추출
+            product_name = goodsname_span.get_text(strip=True)
+            return self._extract_manufacturer(product_name)
+            
+        except Exception:
+            return None
+    
+    def _get_keyword_based_manufacturers(self, keyword: str) -> List[Dict[str, str]]:
+        """키워드 기반으로 관련 제조사들을 반환합니다"""
+        if not keyword:
             return []
+        
+        keyword_lower = keyword.lower()
+        manufacturers = set()
+        
+        # 그래픽카드 관련
+        if any(word in keyword_lower for word in ['rtx', 'gtx', 'rx', '그래픽카드', 'gpu', 'vga', '지포스', 'radeon', '5080', '4090', '4080']):
+            manufacturers.update(['NVIDIA', 'AMD', 'MSI', 'ASUS', '기가바이트', 'EVGA', 'Zotac', 'Sapphire'])
+        
+        # SSD 관련
+        elif any(word in keyword_lower for word in ['ssd', 'nvme', 'm.2', '9a1', 'pm9a1']):
+            manufacturers.update(['삼성전자', 'WD', 'Crucial', 'Kingston', 'ADATA', 'Seagate'])
+        
+        # CPU 관련
+        elif any(word in keyword_lower for word in ['cpu', '프로세서', 'intel', 'amd', 'ryzen', 'core', 'i5', 'i7', 'i9']):
+            manufacturers.update(['인텔', 'AMD'])
+        
+        # 메모리 관련
+        elif any(word in keyword_lower for word in ['메모리', 'ram', 'ddr4', 'ddr5']):
+            manufacturers.update(['삼성전자', 'SK하이닉스', 'Corsair', 'G.SKILL', 'Kingston'])
+        
+        # 기본값
+        else:
+            manufacturers.update(['삼성전자', 'LG', '인텔', 'AMD'])
+        
+        return self._format_manufacturer_list(manufacturers)
+    
+    def _format_manufacturer_list(self, manufacturers: set) -> List[Dict[str, str]]:
+        """제조사 set을 정렬된 리스트로 변환합니다"""
+        manufacturer_list = []
+        for manufacturer in sorted(manufacturers):
+            manufacturer_list.append({
+                'name': manufacturer,
+                'code': manufacturer.lower().replace(' ', '_').replace('.', '')
+            })
+        return manufacturer_list
     
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:
         """
@@ -125,45 +171,48 @@ class GuidecomParser:
     def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
         """
         가이드컴에서 제품을 검색합니다.
-        dibugguid.txt 기반으로 API URL 구조 사용
+        dibugguid.txt 기반 URL과 정렬 옵션 사용
         """
-        # 정렬 타입 매핑 (danawa.py와 호환)
-        order_map = {
-            "saveDESC": "event_goods",  # 추천상품 -> 행사상품
-            "opinionDESC": "reco_goods",  # 인기상품
-            "priceDESC": "price_0",    # 가격 낮은 순
-            "priceASC": "price_0"      # 가격 낮은 순
-        }
-        
-        order = order_map.get(sort_type, "reco_goods")
-        
-        params = {
-            'keyword': keyword,
-            'order': order
-        }
-        
         try:
+            # dibugguid.txt 기준 정렬 매핑
+            order_map = {
+                "saveDESC": "event_goods",    # 추천상품 -> 행사상품
+                "opinionDESC": "reco_goods",  # 인기상품 -> 인기상품
+                "priceDESC": "price_0",       # 가격 높은순 -> 낮은가격순 (가이드컴 특성)
+                "priceASC": "price_0"         # 가격 낮은순 -> 낮은가격순
+            }
+            
+            order = order_map.get(sort_type, "reco_goods")
+            
+            # dibugguid.txt 기준 파라미터
+            params = {
+                'keyword': keyword,
+                'order': order
+            }
+            
             response = self.session.get(self.base_url, params=params)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
+            
             products = []
             
-            # 새로운 구조: div id="goods-list"
-            goods_list = soup.find('div', id='goods-list')
+            # goods.txt 구조에 따른 파싱
+            goods_list = self._find_goods_list(soup)
             if not goods_list:
                 return []
 
             # 모든 goods-row 찾기
-            items = goods_list.find_all('div', class_='goods-row')
-            for item in items[:limit]:
-                product = self._parse_product_item(item)
+            goods_rows = goods_list.find_all('div', class_='goods-row')
+            
+            for row in goods_rows[:limit]:
+                product = self._parse_product_item(row)
                 if product and self._filter_by_maker(product, maker_codes):
                     products.append(product)
                     
             return products
             
         except Exception as e:
-            print(f"An error occurred while searching for products: {e}")
+            print(f"제품 검색 오류: {e}")
             return []
     
     def _filter_by_maker(self, product: Product, maker_codes: List[str]) -> bool:
@@ -180,43 +229,59 @@ class GuidecomParser:
         manufacturer_code = manufacturer.lower().replace(' ', '_')
         return manufacturer_code in maker_codes
 
-    def _parse_product_item(self, item) -> Optional[Product]:
+    def _parse_product_item(self, goods_row) -> Optional[Product]:
         """
-        새로운 구조에 따라 제품 정보를 추출합니다.
-        - 상품명: span class="goodsname1"
-        - 가격: div class="prices" > span
-        - 스펙: div class="feature"
+        goods.txt 구조에 최적화된 제품 정보 추출
+        dibugguid.txt 기준:
+        - 상품명: div.desc > h4.title > span.goodsname1  
+        - 가격: div.prices > div.price-large.price > span
+        - 스펙: div.desc > div.feature
         """
         try:
-            # 상품명 추출: div class="desc" > h4 class="title" > span class="goodsname1"
-            desc_div = item.find('div', class_='desc')
+            # 1. 상품명 추출 (goods.txt 라인 6, 25, 44 기준)
+            desc_div = goods_row.find('div', class_='desc')
             if not desc_div:
                 return None
             
-            goodsname_span = desc_div.find('span', class_='goodsname1')
-            name = goodsname_span.get_text(strip=True) if goodsname_span else "정보 없음"
-
-            # 가격 추출: div class="prices" > div class="price-large price" > span
-            prices_div = item.find('div', class_='prices')
+            title_h4 = desc_div.find('h4', class_='title')
+            if not title_h4:
+                return None
+                
+            goodsname_span = title_h4.find('span', class_='goodsname1')
+            if not goodsname_span:
+                return None
+                
+            # highlight 태그 포함한 전체 텍스트 추출
+            name = goodsname_span.get_text(strip=True)
+            
+            # 2. 가격 추출 (goods.txt 라인 12, 31, 50 기준)
+            prices_div = goods_row.find('div', class_='prices')
             price = "가격 문의"
             if prices_div:
-                price_span = prices_div.find('span')
-                if price_span:
-                    price = price_span.get_text(strip=True) + "원"
+                price_large_div = prices_div.find('div', class_='price-large')
+                if price_large_div:
+                    price_span = price_large_div.find('span')
+                    if price_span and price_span.get_text(strip=True):
+                        raw_price = price_span.get_text(strip=True)
+                        # 숫자만 있는 경우 '원' 추가
+                        if raw_price.isdigit() or ',' in raw_price:
+                            price = raw_price + "원"
+                        else:
+                            price = raw_price
 
-            # 스펙 정보 추출: div class="feature"
+            # 3. 스펙 정보 추출 (goods.txt 라인 7, 26, 45 기준)
             specifications = "사양 정보 없음"
             feature_div = desc_div.find('div', class_='feature')
             if feature_div:
-                # 전체 텍스트를 가져와서 정리
+                # dibugguid.txt: 스펙 정보를 ' / '로 구분
                 full_text = feature_div.get_text(separator=' / ', strip=True)
-                if full_text:
+                if full_text and len(full_text) > 10:  # 의미있는 스펙 정보만
                     specifications = full_text
-
+            
             return Product(name=name, price=price, specifications=specifications)
             
         except Exception as e:
-            print(f"Error parsing product item: {e}")
+            print(f"제품 파싱 오류: {e}")
             return None
 
     def get_unique_products(self, keyword: str, maker_codes: List[str]) -> List[Product]:

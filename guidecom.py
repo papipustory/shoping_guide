@@ -44,13 +44,12 @@ class GuidecomParser:
             # 1단계: goods-list 찾기
             goods_list = self._find_goods_list(soup)
             if not goods_list:
-                # 사이트 접근 실패시 키워드 기반 제조사 반환
-                return self._get_keyword_based_manufacturers(keyword)
+                return []
             
             # 2단계: goods-row들에서 제품명 추출
             goods_rows = goods_list.find_all('div', class_='goods-row')
             if not goods_rows:
-                return self._get_keyword_based_manufacturers(keyword)
+                return []
             
             # 3단계: 각 제품에서 제조사 추출 (최대 20개 제품 확인)
             for row in goods_rows[:20]:
@@ -61,17 +60,12 @@ class GuidecomParser:
                     if len(manufacturers) >= 8:
                         break
             
-            # 4단계: 제조사 목록이 비어있으면 키워드 기반으로 대체
-            if not manufacturers:
-                return self._get_keyword_based_manufacturers(keyword)
-            
-            # 5단계: 제조사 목록을 정렬하여 반환
+            # 4단계: 제조사 목록을 정렬하여 반환
             return self._format_manufacturer_list(manufacturers)
             
         except Exception as e:
             print(f"검색 옵션 가져오기 오류: {e}")
-            # 오류 발생시 키워드 기반 제조사 반환
-            return self._get_keyword_based_manufacturers(keyword)
+            return []
     
     def _find_goods_list(self, soup):
         """goods-list div를 찾습니다 (goods.txt 구조 기준)"""
@@ -110,35 +104,6 @@ class GuidecomParser:
         except Exception:
             return None
     
-    def _get_keyword_based_manufacturers(self, keyword: str) -> List[Dict[str, str]]:
-        """키워드 기반으로 관련 제조사들을 반환합니다"""
-        if not keyword:
-            return []
-        
-        keyword_lower = keyword.lower()
-        manufacturers = set()
-        
-        # 그래픽카드 관련
-        if any(word in keyword_lower for word in ['rtx', 'gtx', 'rx', '그래픽카드', 'gpu', 'vga', '지포스', 'radeon', '5080', '4090', '4080']):
-            manufacturers.update(['NVIDIA', 'AMD', 'MSI', 'ASUS', '기가바이트', 'EVGA', 'Zotac', 'Sapphire'])
-        
-        # SSD 관련
-        elif any(word in keyword_lower for word in ['ssd', 'nvme', 'm.2', '9a1', 'pm9a1']):
-            manufacturers.update(['삼성전자', 'WD', 'Crucial', 'Kingston', 'ADATA', 'Seagate'])
-        
-        # CPU 관련
-        elif any(word in keyword_lower for word in ['cpu', '프로세서', 'intel', 'amd', 'ryzen', 'core', 'i5', 'i7', 'i9']):
-            manufacturers.update(['인텔', 'AMD'])
-        
-        # 메모리 관련
-        elif any(word in keyword_lower for word in ['메모리', 'ram', 'ddr4', 'ddr5']):
-            manufacturers.update(['삼성전자', 'SK하이닉스', 'Corsair', 'G.SKILL', 'Kingston'])
-        
-        # 기본값
-        else:
-            manufacturers.update(['삼성전자', 'LG', '인텔', 'AMD'])
-        
-        return self._format_manufacturer_list(manufacturers)
     
     def _format_manufacturer_list(self, manufacturers: set) -> List[Dict[str, str]]:
         """제조사 set을 정렬된 리스트로 변환합니다"""

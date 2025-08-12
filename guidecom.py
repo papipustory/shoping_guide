@@ -14,7 +14,7 @@ class GuidecomParser:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
             'Accept-Encoding': 'gzip, deflate',
@@ -42,17 +42,18 @@ class GuidecomParser:
             soup = BeautifulSoup(response.text, 'html.parser')
             manufacturers = set()
             
-            # goods.txt 구조 분석:
-            # <div id="goods-placeholder">
-            #   <div id="goods-list">
-            #     <div class="goods-row">
-            #       <div class="desc">
-            #         <h4 class="title">
-            #           <span class="goodsname1">제품명</span>
+            # 실제 HTML 응답 일부 출력 (디버깅용)
+            print(f"DEBUG: 응답 URL: {response.url}")
+            print(f"DEBUG: 응답 길이: {len(response.text)}")
+            print(f"DEBUG: HTML 일부 (처음 500자):")
+            print(response.text[:500])
+            print(f"DEBUG: HTML 일부 (중간 500자):")
+            print(response.text[len(response.text)//2:len(response.text)//2+500])
             
             # 1단계: goods-list 찾기
             goods_list = self._find_goods_list(soup)
             if not goods_list:
+                print("DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
                 return []
             
             # 2단계: goods-row들에서 제품명 추출
@@ -103,7 +104,15 @@ class GuidecomParser:
             soup.find('div', class_='item-list'),
             soup.find('div', class_='search-result'),
             soup.find('div', class_='list-wrap'),
-            soup.find('section', class_='goods')
+            soup.find('section', class_='goods'),
+            soup.find('div', class_='goods'),
+            soup.find('ul', class_='goods'),
+            soup.find('div', class_='shop-list'),
+            soup.find('div', class_='result-list'),
+            soup.find('section', class_='product'),
+            soup.find('div', class_='content'),
+            soup.find('main'),
+            soup.find('section', class_='main')
         ]
         
         for container in possible_containers:

@@ -1,5 +1,4 @@
 import os
-import io
 import streamlit as st
 import pandas as pd
 from guidecom import GuidecomParser, Product
@@ -101,20 +100,9 @@ if st.session_state.products:
     df = pd.DataFrame(data)
     st.dataframe(df, height=35 * (len(df) + 1), use_container_width=True)
 
-    # (수정) 안전한 다운로드: BytesIO 사용 → TypeError 방지
+    # (엑셀 제거) CSV만 제공
     csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("⬇️ CSV 다운로드", data=csv_bytes, file_name="guidecom_search.csv", mime="text/csv")
-
-    xlsx_buffer = io.BytesIO()
-    with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="검색결과")
-    xlsx_buffer.seek(0)
-    st.download_button(
-        "⬇️ 엑셀 다운로드",
-        data=xlsx_buffer,
-        file_name="guidecom_search.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
 
     # Reset
     if st.button("새로 검색하기"):

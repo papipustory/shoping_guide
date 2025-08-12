@@ -30,29 +30,58 @@ class GuidecomParser:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            print(f"DEBUG: 응답 URL: {response.url}")
+            print(f"DEBUG: 응답 상태: {response.status_code}")
+            
             manufacturers = set()
             
             # div id="goods-list" 에서 제품 찾기
             goods_list = soup.find('div', id='goods-list')
+            print(f"DEBUG: goods-list 찾음: {goods_list is not None}")
+            
             if not goods_list:
+                # 다른 가능한 컨테이너 찾기
+                all_divs = soup.find_all('div', id=True)
+                print(f"DEBUG: 모든 div id들: {[div.get('id') for div in all_divs[:10]]}")
+                
+                # goods.txt와 비교해서 다른 구조 시도
+                goods_placeholder = soup.find('div', id='goods-placeholder')
+                if goods_placeholder:
+                    goods_list = goods_placeholder.find('div', id='goods-list')
+                    print(f"DEBUG: goods-placeholder 내 goods-list 찾음: {goods_list is not None}")
+            
+            if not goods_list:
+                print("DEBUG: goods-list를 찾을 수 없습니다")
                 return []
             
             # 모든 goods-row 찾기
             goods_rows = goods_list.find_all('div', class_='goods-row')
+            print(f"DEBUG: goods-row 개수: {len(goods_rows)}")
             
-            for row in goods_rows:
+            for i, row in enumerate(goods_rows[:3]):  # 처음 3개만 디버깅
+                print(f"DEBUG: Row {i+1} 처리 중...")
+                
                 # span class="goodsname1"에서 제품명 추출
                 goodsname_span = row.find('span', class_='goodsname1')
+                print(f"DEBUG: goodsname1 span 찾음: {goodsname_span is not None}")
+                
                 if goodsname_span:
                     # highlight 태그 제거하고 텍스트만 추출
                     product_name = goodsname_span.get_text(strip=True)
+                    print(f"DEBUG: 제품명: {product_name}")
+                    
                     manufacturer = self._extract_manufacturer(product_name)
+                    print(f"DEBUG: 추출된 제조사: {manufacturer}")
+                    
                     if manufacturer:
                         manufacturers.add(manufacturer)
+                        print(f"DEBUG: 현재 제조사 목록: {manufacturers}")
                         
                         # 최대 8개 제한
                         if len(manufacturers) >= 8:
                             break
+            
+            print(f"DEBUG: 최종 제조사 set: {manufacturers}")
             
             # 제조사 목록을 알파벳순으로 정렬하여 반환
             manufacturer_list = []
@@ -62,10 +91,13 @@ class GuidecomParser:
                     'code': manufacturer.lower().replace(' ', '_')
                 })
             
+            print(f"DEBUG: 최종 반환 목록: {manufacturer_list}")
             return manufacturer_list
             
         except Exception as e:
             print(f"An error occurred while fetching search options: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:

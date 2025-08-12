@@ -16,7 +16,13 @@ class Product:
 class GuidecomParser:
     def __init__(self):
         self.session = requests.Session()
-        self.base_url = "https://www.guidecom.co.kr/search/index.html"
+        self.base_url = "https://www.guidecom.co.kr/search/"
+        # 대안 URL들
+        self.alternative_urls = [
+            "https://www.guidecom.co.kr/search/",
+            "https://www.guidecom.co.kr/shop/search.html",
+            "https://www.guidecom.co.kr/shop/"
+        ]
         self.last_request_time = 0
         self._setup_session()
         
@@ -157,22 +163,36 @@ class GuidecomParser:
             soup = BeautifulSoup(response.text, 'html.parser')
             manufacturers = set()
             
-            # 실제 HTML 응답 일부 출력 (디버깅용)
+            # 상세한 디버그 정보 출력
             try:
                 import streamlit as st
-                st.write(f"🔍 DEBUG: 응답 URL: {response.url}")
+                st.write(f"🔍 DEBUG: 요청 URL: {response.url}")
                 st.write(f"📏 DEBUG: 응답 길이: {len(response.text)}")
-                st.write(f"📝 DEBUG: HTML 일부 (처음 500자):")
-                st.code(response.text[:500])
-                st.write(f"📝 DEBUG: HTML 일부 (중간 500자):")
-                st.code(response.text[len(response.text)//2:len(response.text)//2+500])
+                st.write(f"📊 DEBUG: Status Code: {response.status_code}")
+                st.write(f"📝 DEBUG: HTML 일부 (처음 1000자):")
+                st.code(response.text[:1000])
+                
+                # title 태그 확인
+                title = soup.find('title')
+                if title:
+                    st.write(f"📄 DEBUG: 페이지 제목: {title.get_text()}")
+                
+                # div 태그들 개수 확인
+                all_divs = soup.find_all('div')
+                st.write(f"🏷️ DEBUG: 총 div 개수: {len(all_divs)}")
+                
+                # goods-list 관련 엘리먼트 확인
+                goods_list = soup.find('div', id='goods-list')
+                goods_placeholder = soup.find('div', id='goods-placeholder')
+                st.write(f"📦 DEBUG: goods-list 존재: {goods_list is not None}")
+                st.write(f"📦 DEBUG: goods-placeholder 존재: {goods_placeholder is not None}")
+                
             except:
-                print(f"DEBUG: 응답 URL: {response.url}")
+                print(f"DEBUG: 요청 URL: {response.url}")
                 print(f"DEBUG: 응답 길이: {len(response.text)}")
-                print(f"DEBUG: HTML 일부 (처음 500자):")
-                print(response.text[:500])
-                print(f"DEBUG: HTML 일부 (중간 500자):")
-                print(response.text[len(response.text)//2:len(response.text)//2+500])
+                print(f"DEBUG: Status Code: {response.status_code}")
+                print(f"DEBUG: HTML 일부 (처음 1000자):")
+                print(response.text[:1000])
             
             # 1단계: goods-list 찾기
             goods_list = self._find_goods_list(soup)

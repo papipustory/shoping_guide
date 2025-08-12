@@ -14,10 +14,16 @@ class GuidecomParser:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
-        # dibugguid.txt 기준 URL
-        self.base_url = "https://www.guidecom.co.kr/search/index.html"
+        # 모바일 버전 URL 사용
+        self.base_url = "https://m.guidecom.co.kr/shop/"
 
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
@@ -25,8 +31,11 @@ class GuidecomParser:
         dibugguid.txt와 goods.txt 구조에 최적화
         """
         try:
-            # dibugguid.txt 기준: https://www.guidecom.co.kr/search/index.html?keyword=검색어
-            params = {'keyword': keyword}
+            # 모바일 버전: https://m.guidecom.co.kr/shop/?mode=search&keyword=검색어
+            params = {
+                'mode': 'search',
+                'keyword': keyword
+            }
             response = self.session.get(self.base_url, params=params)
             response.raise_for_status()
             
@@ -68,16 +77,49 @@ class GuidecomParser:
             return []
     
     def _find_goods_list(self, soup):
-        """goods-list div를 찾습니다 (goods.txt 구조 기준)"""
-        # 직접 찾기
+        """모바일 버전에서 제품 리스트를 찾습니다"""
+        print(f"DEBUG: HTML 구조 분석 중...")
+        
+        # 1. 기존 데스크톱 구조 시도
         goods_list = soup.find('div', id='goods-list')
         if goods_list:
+            print(f"DEBUG: 데스크톱 구조 goods-list 찾음")
             return goods_list
         
-        # goods-placeholder 내부에서 찾기
+        # 2. goods-placeholder 내부에서 찾기
         goods_placeholder = soup.find('div', id='goods-placeholder')
         if goods_placeholder:
-            return goods_placeholder.find('div', id='goods-list')
+            goods_list = goods_placeholder.find('div', id='goods-list')
+            if goods_list:
+                print(f"DEBUG: goods-placeholder 내 goods-list 찾음")
+                return goods_list
+        
+        # 3. 모바일 버전 가능한 구조들 찾기
+        possible_containers = [
+            soup.find('div', class_='goods-list'),
+            soup.find('ul', class_='goods-list'),
+            soup.find('div', class_='product-list'),
+            soup.find('ul', class_='product-list'),
+            soup.find('div', class_='item-list'),
+            soup.find('div', class_='search-result'),
+            soup.find('div', class_='list-wrap'),
+            soup.find('section', class_='goods')
+        ]
+        
+        for container in possible_containers:
+            if container:
+                print(f"DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
+                return container
+        
+        # 4. 모든 div들 중 제품이 있을 만한 것들 찾기
+        all_divs = soup.find_all('div')
+        print(f"DEBUG: 총 div 개수: {len(all_divs)}")
+        
+        for div in all_divs:
+            if div.get('class'):
+                class_name = ' '.join(div.get('class'))
+                if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
+                    print(f"DEBUG: 가능한 컨테이너: div.{class_name}")
         
         return None
     
@@ -145,18 +187,19 @@ class GuidecomParser:
         가이드컴은 제조사별 API 필터링이 없으므로 클라이언트 사이드에서 필터링
         """
         try:
-            # dibugguid.txt 기준 정렬 매핑
+            # 모바일 버전 정렬 매핑
             order_map = {
-                "saveDESC": "event_goods",    # 추천상품 -> 행사상품
+                "saveDESC": "reco_goods",     # 추천상품 -> 인기상품
                 "opinionDESC": "reco_goods",  # 인기상품 -> 인기상품
-                "priceDESC": "price_0",       # 가격 높은순 -> 낮은가격순 (가이드컴 특성)
+                "priceDESC": "price_0",       # 가격 높은순 -> 낮은가격순
                 "priceASC": "price_0"         # 가격 낮은순 -> 낮은가격순
             }
             
             order = order_map.get(sort_type, "reco_goods")
             
-            # dibugguid.txt 기준 파라미터
+            # 모바일 버전 파라미터
             params = {
+                'mode': 'search',
                 'keyword': keyword,
                 'order': order
             }

@@ -1,3 +1,4 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ Guidecom 상품 검색/파싱 모듈 (app.py 수정 없이 사용)
 - 검색 엔드포인트 2가지 모두 지원
   1) GET  https://www.guidecom.co.kr/search/index.html?keyword=...&order=...
   2) POST https://www.guidecom.co.kr/search/list.php (keyword/order/lpp/page)
-- 실제 리스트는 list.php가 반환하는 HTML 조각(여러 개의 <div class="goods-row">)에 있음
+- 디버깅: 환경변수 GUIDECOM_DEBUG=1 이면 상세 로그를 콘솔(스트림릿 로그)로 출력
 """
 
 @dataclass
@@ -31,9 +32,15 @@ class GuidecomParser:
             "https://www.guidecom.co.kr/shop/search.html",
             "https://www.guidecom.co.kr/shop/",
         ]
+        self.debug = str(os.getenv("GUIDECOM_DEBUG", "0")).lower() in {"1", "true", "yes"}
         self.session = requests.Session()
         self.last_request_time = 0.0
         self._setup_session()
+
+    # ----------------------- Debug helper -----------------------
+    def _dbg(self, msg: str) -> None:
+        if self.debug:
+            print(f"[GUIDECOM][DEBUG] {msg}", flush=True)
 
     # ----------------------- Session helpers -----------------------
     def _setup_session(self) -> None:
@@ -80,12 +87,15 @@ class GuidecomParser:
                 self._wait_between_requests()
                 if attempt > 0:
                     time.sleep(self._get_random_delay(1.2, 2.2))
+                self._dbg(f"GET {url} params={params}")
                 resp = self.session.get(url, params=params, timeout=20, allow_redirects=True)
                 self._fix_encoding(resp)
+                self._dbg(f"GET status={resp.status_code} encoding={resp.encoding} len={len(resp.text)}")
                 if resp.status_code == 200 and len(resp.text) > 300:
                     return resp
             except requests.RequestException as e:
                 last_exc = e
+                self._dbg(f"GET exception: {e}")
         raise last_exc if last_exc else RuntimeError("요청 실패")
 
     def _post_list(self, keyword: str, order: str, page: int = 1, lpp: int = 30) -> Optional[BeautifulSoup]:
@@ -96,17 +106,22 @@ class GuidecomParser:
             referer = f"https://www.guidecom.co.kr/search/?keyword={quote_plus(keyword)}&order={order}"
             headers = {"Referer": referer}
             data = {"keyword": keyword, "order": order, "lpp": lpp, "page": page, "y": 0}
+            self._dbg(f"POST {self.list_url} data={data} referer={referer}")
             resp = self.session.post(self.list_url, data=data, headers=headers, timeout=20)
             self._fix_encoding(resp)
+            self._dbg(f"POST status={resp.status_code} encoding={resp.encoding} len={len(resp.text)}")
             if resp.status_code == 200 and len(resp.text) > 100:
-                return BeautifulSoup(resp.text, "lxml")
-        except requests.RequestException:
+                soup = BeautifulSoup(resp.text, "lxml")
+                rows = soup.find_all("div", class_="goods-row")
+                self._dbg(f"POST parsed goods-row={len(rows)}")
+                return soup
+        except requests.RequestException as e:
+            self._dbg(f"POST exception: {e}")
             return None
         return None
 
     # ----------------------- Parsing helpers -----------------------
     def _find_goods_list(self, soup: BeautifulSoup):
-        # GET 페이지용 래퍼 탐색
         gl = soup.find(id="goods-list")
         if gl:
             return gl
@@ -135,6 +150,7 @@ class GuidecomParser:
                 name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
             name = self._extract_text(name_el)
             if not name:
+                self._dbg("name not found; row snippet=" + (row.decode()[:200] if hasattr(row, 'decode') else str(row)[:200]))
                 return None
             # 스펙
             spec_el = row.select_one(".desc .feature")
@@ -143,7 +159,8 @@ class GuidecomParser:
             price_el = row.select_one(".prices .price-large span") or row.select_one(".price-large span")
             price = self._parse_price(self._extract_text(price_el))
             return Product(name=name, price=price, specifications=specs)
-        except Exception:
+        except Exception as e:
+            self._dbg(f"_parse_product_item exception: {e}")
             return None
 
     # ----------------------- Manufacturer helpers -----------------------
@@ -191,7 +208,10 @@ class GuidecomParser:
         if not name_el:
             name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
         name = self._extract_text(name_el)
-        return self._extract_manufacturer(name)
+        maker = self._extract_manufacturer(name)
+        if self.debug:
+            self._dbg(f"NAME='{name[:80]}' -> MFR='{maker}'")
+        return maker
 
     def _filter_by_maker(self, product: Product, maker_codes: List[str]) -> bool:
         if not maker_codes:
@@ -226,6 +246,9 @@ class GuidecomParser:
         제조사 후보를 최대 8개까지 반환.
         1) list.php POST 결과에서 우선 추출
         2) 실패 시 검색 페이지(GET)에서 보조 추출
+        디버깅 출력:
+          - goods-row 개수
+          - 샘플 제품명들, 제품명->제조사 매핑 몇 개
         """
         manufacturers: List[str] = []
         seen = set()
@@ -241,21 +264,32 @@ class GuidecomParser:
                 container = self._find_goods_list(soup2)
                 rows = container.find_all("div", class_="goods-row") if container else []
 
-            for row in rows[:80]:
-                maker = self._extract_manufacturer_from_row(row)
-                if not maker or maker in seen:
-                    continue
-                manufacturers.append(maker)
-                seen.add(maker)
+            self._dbg(f"get_search_options: goods-row count={len(rows)}")
+            sample_names: List[str] = []
+
+            for idx, row in enumerate(rows[:80]):
+                name_el = row.select_one(".desc .goodsname1") or row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+                nm = self._extract_text(name_el)
+                if self.debug and idx < 10:
+                    sample_names.append(nm)
+                maker = self._extract_manufacturer(nm)
+                if maker and maker not in seen:
+                    manufacturers.append(maker)
+                    seen.add(maker)
                 if len(manufacturers) >= 8:
                     break
+
+            if self.debug:
+                self._dbg("sample names: " + " | ".join(sample_names))
+                self._dbg("manufacturers: " + ", ".join(manufacturers))
 
             def sort_key(x: str):
                 xn = self._normalize_brand(x)
                 return (0 if re.search(r"[가-힣]", x) else 1, xn)
 
             return [{"name": m, "code": self._normalize_brand(m).replace(" ", "_")} for m in sorted(manufacturers, key=sort_key)]
-        except Exception:
+        except Exception as e:
+            self._dbg(f"get_search_options exception: {e}")
             return []
 
     def _resolve_order_param(self, sort_type: str) -> str:
@@ -287,6 +321,7 @@ class GuidecomParser:
                 soup2 = BeautifulSoup(resp.text, "lxml")
                 container = self._find_goods_list(soup2)
                 rows = container.find_all("div", class_="goods-row") if container else []
+            self._dbg(f"search_products: order={order} rows={len(rows)}")
             out: List[Product] = []
             for row in rows:
                 p = self._parse_product_item(row)
@@ -297,8 +332,10 @@ class GuidecomParser:
                 out.append(p)
                 if len(out) >= limit:
                     break
+            self._dbg(f"search_products: returned={len(out)}")
             return out
-        except Exception:
+        except Exception as e:
+            self._dbg(f"search_products exception: {e}")
             return []
 
     def get_unique_products(self, keyword: str, maker_codes: List[str]) -> List[Product]:
@@ -322,4 +359,5 @@ class GuidecomParser:
                 took += 1
                 if took >= want:
                     break
+        self._dbg(f"get_unique_products: total={len(results)} unique names={len(seen_names)}")
         return results[:10]

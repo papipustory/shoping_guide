@@ -127,11 +127,17 @@ class GuidecomParser:
         if not words:
             return None
         
+        print(f"DEBUG 제조사추출: 제품명='{product_name}', 분할된단어={words[:3]}")
+        
         # 첫 단어가 '공식인증' 또는 '병행수입'인 경우
         if words[0] in ['공식인증', '병행수입'] and len(words) > 1:
-            return words[1]
+            manufacturer = words[1]
+            print(f"DEBUG: 공식인증/병행수입 제외 → 제조사='{manufacturer}'")
+            return manufacturer
         else:
-            return words[0]
+            manufacturer = words[0]
+            print(f"DEBUG: 첫 단어 → 제조사='{manufacturer}'")
+            return manufacturer
 
     def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
         """
@@ -219,25 +225,28 @@ class GuidecomParser:
         if not manufacturer:
             return False
         
-        # 제조사 코드 생성 (공백, 점 제거)
-        manufacturer_code = manufacturer.lower().replace(' ', '_').replace('.', '')
+        print(f"DEBUG 필터링: 제품명='{product.name[:30]}...', 추출제조사='{manufacturer}', 선택코드={maker_codes}")
         
-        # 선택된 제조사 코드들과 비교
+        # 간단한 매칭: 제조사명이 선택된 제조사 목록에 있는지 확인
+        manufacturer_lower = manufacturer.lower()
+        
         for selected_code in maker_codes:
-            selected_code_clean = selected_code.lower().replace(' ', '_').replace('.', '')
+            # 코드에서 제조사명 추출 (code는 name.lower().replace(' ', '_') 형태)
+            selected_name = selected_code.replace('_', ' ').lower()
             
-            # 정확한 매칭
-            if manufacturer_code == selected_code_clean:
+            print(f"DEBUG: '{manufacturer_lower}' vs '{selected_name}' 비교")
+            
+            # 직접 매칭
+            if manufacturer_lower == selected_name:
+                print(f"DEBUG: 직접 매칭 성공!")
                 return True
             
-            # 부분 매칭 (예: 삼성전자 vs 삼성)
-            if manufacturer_code in selected_code_clean or selected_code_clean in manufacturer_code:
-                return True
-            
-            # 브랜드 별칭 확인 (예: 삼성전자 = samsung)
-            if self._check_brand_alias(manufacturer, selected_code):
+            # 부분 매칭 (제조사명이 포함되어 있는지)
+            if manufacturer_lower in selected_name or selected_name in manufacturer_lower:
+                print(f"DEBUG: 부분 매칭 성공!")
                 return True
         
+        print(f"DEBUG: 매칭 실패")
         return False
     
     def _check_brand_alias(self, manufacturer: str, selected_code: str) -> bool:

@@ -133,6 +133,12 @@ class GuidecomParser:
                 soup = BeautifulSoup(resp.text, "lxml")
                 rows = soup.find_all("div", class_="goods-row")
                 self._dbg(f"POST parsed goods-row={len(rows)}")
+                
+                # 디버그: 첫 번째 상품의 HTML 구조 확인
+                if self.debug and rows:
+                    self._dbg(f"=== FIRST PRODUCT HTML ===")
+                    self._dbg(f"First row HTML: {str(rows[0])[:1000]}")
+                    
                 return soup
         except requests.RequestException as e:
             self._dbg(f"POST exception: {e}")
@@ -163,40 +169,115 @@ class GuidecomParser:
 
     def _parse_product_item(self, row) -> Optional[Product]:
         try:
-            # 이름: goodsname1을 우선, 없으면 a 텍스트 사용
-            name_el = row.select_one(".desc .goodsname1")
-            if not name_el:
-                name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+            # 디버그: 전체 row HTML 구조 출력
+            if self.debug:
+                self._dbg(f"=== ROW HTML DEBUG ===")
+                self._dbg(f"Row classes: {row.get('class', [])}")
+                self._dbg(f"Row HTML (first 500 chars): {str(row)[:500]}")
+            
+            # 이름: 여러 선택자 시도
+            name_selectors = [
+                ".desc .goodsname1",
+                ".desc h4.title a", 
+                "h4.title a",
+                ".desc .title a",
+                ".title a",
+                ".desc a",
+                "a"
+            ]
+            
+            name_el = None
+            for selector in name_selectors:
+                name_el = row.select_one(selector)
+                if name_el:
+                    self._dbg(f"Found name with selector: {selector}")
+                    break
+                    
             name = self._extract_text(name_el)
             if not name:
-                self._dbg("name not found; row snippet=" + (row.decode()[:200] if hasattr(row, 'decode') else str(row)[:200]))
+                self._dbg("=== NAME NOT FOUND ===")
+                self._dbg(f"Available elements: {[tag.name for tag in row.find_all()]}")
+                self._dbg(f"All text in row: {row.get_text(' ', strip=True)}")
                 return None
-            # 스펙 (여러 선택자 시도)
-            spec_el = (row.select_one(".desc .feature") or 
-                      row.select_one(".feature") or 
-                      row.select_one(".desc .spec") or 
-                      row.select_one(".spec") or 
-                      row.select_one(".desc .description") or
-                      row.select_one(".description") or
-                      row.select_one(".desc .summary") or
-                      row.select_one(".summary"))
-            specs = self._extract_text(spec_el)
+                
+            self._dbg(f"Product name: {name}")
+            
+            # 스펙 추출: 더 광범위한 선택자
+            spec_selectors = [
+                ".desc .feature",
+                ".feature", 
+                ".desc .spec",
+                ".spec",
+                ".desc .description",
+                ".description",
+                ".desc .summary",
+                ".summary",
+                ".desc .info",
+                ".info",
+                ".desc ul",
+                ".desc p",
+                ".goodsinfo"
+            ]
+            
+            specs = ""
+            for selector in spec_selectors:
+                spec_el = row.select_one(selector)
+                if spec_el:
+                    specs = self._extract_text(spec_el)
+                    if specs and specs != name:
+                        self._dbg(f"Found specs with selector {selector}: {specs[:100]}")
+                        break
+                        
             if not specs:
-                # 추가 시도: desc 내 모든 텍스트에서 제품명 제외하고 가져오기
+                # 마지막 시도: .desc 내 모든 텍스트 추출
                 desc_el = row.select_one(".desc")
                 if desc_el:
-                    desc_text = self._extract_text(desc_el)
-                    # 제품명을 제외한 나머지 텍스트를 스펙으로 사용
-                    if name and name in desc_text:
-                        specs = desc_text.replace(name, "").strip()
-                    else:
-                        specs = desc_text
-            # 가격
-            price_el = row.select_one(".prices .price-large span") or row.select_one(".price-large span")
-            price = self._parse_price(self._extract_text(price_el))
-            return Product(name=name, price=price, specifications=specs)
+                    # 링크 텍스트 제거하고 나머지 텍스트 가져오기
+                    desc_copy = desc_el.__copy__()
+                    for a_tag in desc_copy.find_all('a'):
+                        a_tag.decompose()
+                    specs = self._extract_text(desc_copy).strip()
+                    if specs:
+                        self._dbg(f"Extracted specs from .desc (no links): {specs[:100]}")
+                        
+            if not specs:
+                self._dbg("=== SPECS NOT FOUND ===")
+                desc_el = row.select_one(".desc")
+                if desc_el:
+                    self._dbg(f"Desc HTML: {str(desc_el)[:300]}")
+                else:
+                    self._dbg("No .desc element found")
+                    
+            # 가격 추출: 더 다양한 선택자
+            price_selectors = [
+                ".prices .price-large span",
+                ".price-large span",
+                ".price-large",
+                ".prices .price span",
+                ".price span", 
+                ".price",
+                ".cost",
+                "[class*='price']"
+            ]
+            
+            price = ""
+            for selector in price_selectors:
+                price_el = row.select_one(selector)
+                if price_el:
+                    price = self._parse_price(self._extract_text(price_el))
+                    if price:
+                        self._dbg(f"Found price with selector {selector}: {price}")
+                        break
+                        
+            if not price:
+                self._dbg("=== PRICE NOT FOUND ===")
+                self._dbg(f"Available elements with 'price' in class: {[str(el)[:100] for el in row.find_all(class_=lambda x: x and 'price' in str(x).lower())]}")
+                
+            return Product(name=name, price=price or "가격 정보 없음", specifications=specs or "사양 정보 없음")
         except Exception as e:
             self._dbg(f"_parse_product_item exception: {e}")
+            import traceback
+            self._dbg(f"Traceback: {traceback.format_exc()}")
             return None
 
     # ----------------------- Manufacturer helpers -----------------------
@@ -220,23 +301,61 @@ class GuidecomParser:
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:
         if not product_name:
             return None
+        
+        self._dbg(f"Extracting manufacturer from: '{product_name}'")
+        
+        # 대괄호 제거 및 정리
         text = re.sub(r"\[[^\]]+\]", " ", product_name)
         text = re.sub(r"\s+", " ", text).strip()
         words = text.split()
+        
         if not words:
+            self._dbg("No words found after cleaning")
             return None
-        skip = {"신제품", "신상품", "공식인증", "병행수입", "벌크", "정품", "스페셜", "한정판", "8월", "7월", "6월", "9월", "10월", "11월", "12월", "1월", "2월", "3월", "4월", "5월"}
+            
+        self._dbg(f"Words after cleaning: {words}")
+        
+        # 건너뛸 단어들 - 더 포괄적으로 확장
+        skip = {
+            "신제품", "신상품", "공식인증", "병행수입", "벌크", "정품", "스페셜", "한정판",
+            "8월", "7월", "6월", "9월", "10월", "11월", "12월", "1월", "2월", "3월", "4월", "5월",
+            "새상품", "리퍼", "중고", "전시", "개봉", "박스", "오픈박스", "리퍼비시",
+            "할인", "특가", "세일", "이벤트", "프로모션", "한정", "무료배송", "당일발송"
+        }
+        
         i = 0
-        while i < len(words) and words[i] in skip:
+        while i < len(words):
+            word = words[i]
+            self._dbg(f"Checking word '{word}' (index {i})")
+            
+            # 정확한 매치 또는 부분 매치 확인
+            should_skip = False
+            for skip_word in skip:
+                if word == skip_word or skip_word in word or word in skip_word:
+                    should_skip = True
+                    self._dbg(f"Skipping word '{word}' (matched with '{skip_word}')")
+                    break
+                    
+            if not should_skip:
+                break
             i += 1
+            
         if i >= len(words):
+            self._dbg("All words were skipped, no manufacturer found")
             return None
+            
         manufacturer = words[i]
+        self._dbg(f"Found manufacturer candidate: '{manufacturer}'")
+        
         # 2단어 브랜드 결합(Western Digital, TP LINK 등)
         if i + 1 < len(words):
             pair = f"{manufacturer} {words[i+1]}"
-            if self._normalize_brand(pair) in {"western digital", "tp link"}:
+            normalized_pair = self._normalize_brand(pair)
+            if normalized_pair in {"western digital", "tp link", "g skill", "team group"}:
                 manufacturer = pair
+                self._dbg(f"Combined into 2-word brand: '{manufacturer}'")
+                
+        self._dbg(f"Final manufacturer: '{manufacturer}'")
         return manufacturer
 
     def _extract_manufacturer_from_row(self, row) -> Optional[str]:
@@ -301,6 +420,12 @@ class GuidecomParser:
                 rows = container.find_all("div", class_="goods-row") if container else []
 
             self._dbg(f"get_search_options: goods-row count={len(rows)}")
+            
+            # 디버그: GET 방식에서도 HTML 구조 확인
+            if self.debug and rows and not soup:  # POST가 실패했을 때만
+                self._dbg(f"=== GET FIRST PRODUCT HTML ===")
+                self._dbg(f"First row HTML: {str(rows[0])[:1000]}")
+                
             sample_names: List[str] = []
 
             for idx, row in enumerate(rows[:80]):

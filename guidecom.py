@@ -1,11 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import re
 import time
 import random
-from urllib.parse import urljoin
 
 @dataclass
 class Product:
@@ -14,583 +13,312 @@ class Product:
     specifications: str
 
 class GuidecomParser:
-    def __init__(self):
-        self.session = requests.Session()
-        self.base_url = "https://www.guidecom.co.kr/search/"
-        # 대안 URL들
+    """
+    Guidecom 상품 검색 파서
+    - 검색 페이지: https://www.guidecom.co.kr/search/index.html
+    - 정렬 파라미터:
+        * 낮은가격  -> order=price_0
+        * 인기상품  -> order=reco_goods
+        * 행사상품  -> order=event_goods
+    """
+    def __init__(self) -> None:
+        self.base_url = "https://www.guidecom.co.kr/search/index.html"
         self.alternative_urls = [
             "https://www.guidecom.co.kr/search/",
             "https://www.guidecom.co.kr/shop/search.html",
             "https://www.guidecom.co.kr/shop/"
         ]
-        self.last_request_time = 0
+        self.session = requests.Session()
+        self.last_request_time = 0.0
         self._setup_session()
-        
-    def _setup_session(self):
-        """크롤링 방지를 우회하기 위한 세션 설정"""
-        # User-Agent 랜덤화를 위한 목록
+
+    # ----------------------- Session helpers -----------------------
+    def _setup_session(self) -> None:
+        # 베이직 헤더
         self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
         ]
-        
-        # 기본 헤더 설정
-        self._update_headers()
-        
-        # SSL 인증서 검증 비활성화 (필요시)
-        self.session.verify = True
-        
-        # 쿠키 활성화
-        self.session.cookies.clear()
-        
-    def _update_headers(self):
-        """헤더를 랜덤하게 업데이트"""
-        headers = {
-            'User-Agent': random.choice(self.user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
-            'Connection': 'keep-alive'
-        }
-        self.session.headers.update(headers)
-        
-    def _get_random_delay(self, min_delay=1, max_delay=3):
-        """랜덤 딜레이 생성"""
-        return random.uniform(min_delay, max_delay)
-        
-    def _wait_between_requests(self):
-        """요청 간 적절한 딜레이 보장"""
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        min_delay = 2.0  # 최소 2초 간격
-        
-        if elapsed < min_delay:
-            sleep_time = min_delay - elapsed + self._get_random_delay(0.5, 1.5)
-            time.sleep(sleep_time)
-            
+        self.session.headers.update({
+            "User-Agent": random.choice(self.user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Connection": "keep-alive",
+        })
+
+    def _update_headers(self) -> None:
+        # 가벼운 헤더 변조로 간단한 방어 우회
+        self.session.headers.update({
+            "User-Agent": random.choice(self.user_agents),
+            "Cache-Control": random.choice(["no-cache", "max-age=0"]),
+        })
+
+    def _get_random_delay(self, a: float = 0.4, b: float = 1.1) -> float:
+        return random.uniform(a, b)
+
+    def _wait_between_requests(self, min_gap: float = 0.25) -> None:
+        now = time.time()
+        delta = now - self.last_request_time
+        if delta < min_gap:
+            time.sleep(min_gap - delta)
         self.last_request_time = time.time()
-        
-    def _make_request(self, url, params=None, retries=3):
-        """재시도 로직이 포함된 안전한 요청"""
+
+    def _make_request(self, url: str, params: Optional[Dict[str, str]] = None, retries: int = 3) -> requests.Response:
+        last_exc = None
         for attempt in range(retries):
             try:
-                # 헤더 랜덤화
                 self._update_headers()
-                
-                # 요청 간 딜레이
                 self._wait_between_requests()
-                
-                # 첫 번째 시도가 아니면 더 긴 딜레이
                 if attempt > 0:
-                    delay = self._get_random_delay(3, 8)
-                    print(f"재시도 {attempt + 1}/{retries}, {delay:.1f}초 대기 중...")
-                    time.sleep(delay)
-                
-                # 실제 요청
-                response = self.session.get(url, params=params, timeout=30, allow_redirects=True)
-                
-                # 응답 상태 확인
-                if response.status_code == 200:
-                    # 응답 길이 확인 (차단된 경우 매우 짧은 응답)
-                    if len(response.text) > 500:  # 정상적인 응답 길이
-                        return response
-                    else:
-                        print(f"짧은 응답 감지 ({len(response.text)}자), 재시도...")
-                        continue
-                elif response.status_code == 429:  # Too Many Requests
-                    print("요청 제한 감지, 더 긴 대기 시간 적용...")
-                    time.sleep(self._get_random_delay(10, 20))
-                    continue
-                else:
-                    print(f"HTTP {response.status_code} 오류")
-                    response.raise_for_status()
-                    
-            except requests.exceptions.Timeout:
-                print(f"타임아웃 발생 (시도 {attempt + 1}/{retries})")
-                if attempt == retries - 1:
-                    raise
-                    
-            except requests.exceptions.RequestException as e:
-                print(f"요청 오류: {e} (시도 {attempt + 1}/{retries})")
-                if attempt == retries - 1:
-                    raise
-                    
-        raise Exception(f"모든 재시도 실패 ({retries}번 시도)")
-        
-    def _simulate_human_behavior(self):
-        """사람의 브라우징 패턴 모방"""
-        # 랜덤한 마우스 움직임 시뮬레이션 (헤더로)
-        self.session.headers.update({
-            'Sec-Fetch-Dest': random.choice(['document', 'empty']),
-            'Cache-Control': random.choice(['no-cache', 'max-age=0'])
-        })
-        
-        # 가끔 다른 페이지 먼저 방문하는 척
-        if random.random() < 0.1:  # 10% 확률
-            try:
-                self.session.get("https://www.guidecom.co.kr", timeout=10)
-                time.sleep(self._get_random_delay(1, 3))
-            except:
-                pass  # 실패해도 무시
+                    time.sleep(self._get_random_delay(1.5, 3.0))
+                resp = self.session.get(url, params=params, timeout=20, allow_redirects=True)
+                # 인코딩 보정(EUC-KR/ISO-8859-1 등)
+                try:
+                    if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "utf-8"):
+                        resp.encoding = resp.apparent_encoding or resp.encoding
+                except Exception:
+                    pass
+                if resp.status_code == 200 and len(resp.text) > 500:
+                    return resp
+            except requests.RequestException as e:
+                last_exc = e
+        raise last_exc if last_exc else RuntimeError("요청 실패")
 
-    def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
-        """
-        가이드컴에서 실제 제품을 검색하여 제조사 정보를 추출합니다.
-        dibugguid.txt와 goods.txt 구조에 최적화
-        """
+    # ----------------------- Parsing helpers -----------------------
+    def _find_goods_list(self, soup: BeautifulSoup):
+        gl = soup.find(id="goods-list")
+        if gl:
+            return gl
+        # 일부 페이지에서 placeholder만 먼저 노출되기도 함
+        placeholder = soup.find(id="goods-placeholder")
+        if placeholder:
+            inner = placeholder.find(id="goods-list")
+            if inner:
+                return inner
+        # 마지막으로 클래스 기반 탐색
+        return soup.find("div", {"id": re.compile(r"^goods-list$")})
+
+    def _extract_text(self, el) -> str:
+        return el.get_text(" ", strip=True) if el else ""
+
+    def _parse_price(self, text: str) -> str:
+        # "46,010원" 혹은 "46,010" 형태 처리
+        t = re.sub(r"[^\d]", "", text or "")
+        if not t:
+            return ""
+        # 천단위 콤마 + 원
+        return f"{int(t):,}원"
+
+    def _parse_product_item(self, row) -> Optional[Product]:
         try:
-            # 사람의 브라우징 패턴 모방
-            self._simulate_human_behavior()
-            
-            # 안전한 요청으로 변경
-            params = {
-                'keyword': keyword
-            }
-            response = self._make_request(self.base_url, params=params)
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            manufacturers = set()
-            
-            # 상세한 디버그 정보 출력
-            try:
-                import streamlit as st
-                st.write(f"🔍 DEBUG: 요청 URL: {response.url}")
-                st.write(f"📏 DEBUG: 응답 길이: {len(response.text)}")
-                st.write(f"📊 DEBUG: Status Code: {response.status_code}")
-                st.write(f"📝 DEBUG: HTML 일부 (처음 1000자):")
-                st.code(response.text[:1000])
-                
-                # title 태그 확인
-                title = soup.find('title')
-                if title:
-                    st.write(f"📄 DEBUG: 페이지 제목: {title.get_text()}")
-                
-                # div 태그들 개수 확인
-                all_divs = soup.find_all('div')
-                st.write(f"🏷️ DEBUG: 총 div 개수: {len(all_divs)}")
-                
-                # goods-list 관련 엘리먼트 확인
-                goods_list = soup.find('div', id='goods-list')
-                goods_placeholder = soup.find('div', id='goods-placeholder')
-                st.write(f"📦 DEBUG: goods-list 존재: {goods_list is not None}")
-                st.write(f"📦 DEBUG: goods-placeholder 존재: {goods_placeholder is not None}")
-                
-            except:
-                print(f"DEBUG: 요청 URL: {response.url}")
-                print(f"DEBUG: 응답 길이: {len(response.text)}")
-                print(f"DEBUG: Status Code: {response.status_code}")
-                print(f"DEBUG: HTML 일부 (처음 1000자):")
-                print(response.text[:1000])
-            
-            # 1단계: goods-list 찾기
-            goods_list = self._find_goods_list(soup)
-            if not goods_list:
-                try:
-                    import streamlit as st
-                    st.error("❌ DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
-                except:
-                    print("DEBUG: goods_list를 찾을 수 없어서 빈 리스트 반환")
-                return []
-            
-            # 2단계: goods-row들에서 제품명 추출
-            goods_rows = goods_list.find_all('div', class_='goods-row')
-            if not goods_rows:
-                return []
-            
-            # 3단계: 각 제품에서 제조사 추출 (최대 20개 제품 확인)
-            for row in goods_rows[:20]:
-                manufacturer = self._extract_manufacturer_from_row(row)
-                if manufacturer:
-                    manufacturers.add(manufacturer)
-                    # 최대 8개 제조사로 제한
-                    if len(manufacturers) >= 8:
-                        break
-            
-            # 4단계: 제조사 목록을 정렬하여 반환
-            return self._format_manufacturer_list(manufacturers)
-            
-        except Exception as e:
-            print(f"검색 옵션 가져오기 오류: {e}")
-            return []
-    
-    def _find_goods_list(self, soup):
-        """데스크탑 버전에서 제품 리스트를 찾습니다"""
-        try:
-            import streamlit as st
-            st.write("🔍 DEBUG: HTML 구조 분석 중...")
-        except:
-            print(f"DEBUG: HTML 구조 분석 중...")
-        
-        # 1. dibugguid.txt에 명시된 구조: div id="goods-list"
-        goods_list = soup.find('div', id='goods-list')
-        if goods_list:
-            try:
-                import streamlit as st
-                st.success("✅ DEBUG: goods-list 찾음")
-            except:
-                print(f"DEBUG: goods-list 찾음")
-            return goods_list
-        
-        # 2. goods-placeholder 내부에서 찾기
-        goods_placeholder = soup.find('div', id='goods-placeholder')
-        if goods_placeholder:
-            goods_list = goods_placeholder.find('div', id='goods-list')
-            if goods_list:
-                try:
-                    import streamlit as st
-                    st.success("✅ DEBUG: goods-placeholder 내 goods-list 찾음")
-                except:
-                    print(f"DEBUG: goods-placeholder 내 goods-list 찾음")
-                return goods_list
-        
-        # 3. 다른 가능한 구조들 찾기
-        possible_containers = [
-            soup.find('div', class_='goods-list'),
-            soup.find('ul', class_='goods-list'),
-            soup.find('div', class_='product-list'),
-            soup.find('ul', class_='product-list'),
-            soup.find('div', class_='item-list'),
-            soup.find('div', class_='search-result'),
-            soup.find('div', class_='list-wrap'),
-            soup.find('section', class_='goods'),
-            soup.find('div', class_='goods'),
-            soup.find('ul', class_='goods'),
-            soup.find('div', class_='shop-list'),
-            soup.find('div', class_='result-list'),
-            soup.find('section', class_='product'),
-            soup.find('div', class_='content'),
-            soup.find('main'),
-            soup.find('section', class_='main')
-        ]
-        
-        for container in possible_containers:
-            if container:
-                try:
-                    import streamlit as st
-                    st.success(f"✅ DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
-                except:
-                    print(f"DEBUG: 모바일 구조 찾음: {container.name}.{container.get('class')}")
-                return container
-        
-        # 4. 모든 div들 중 제품이 있을 만한 것들 찾기
-        all_divs = soup.find_all('div')
-        try:
-            import streamlit as st
-            st.warning(f"⚠️ DEBUG: 총 div 개수: {len(all_divs)}")
-            
-            possible_divs = []
-            for div in all_divs:
-                if div.get('class'):
-                    class_name = ' '.join(div.get('class'))
-                    if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
-                        possible_divs.append(f"div.{class_name}")
-            
-            if possible_divs:
-                st.write("🔍 DEBUG: 가능한 컨테이너들:")
-                for div_info in possible_divs:
-                    st.write(f"- {div_info}")
-        except:
-            print(f"DEBUG: 총 div 개수: {len(all_divs)}")
-            for div in all_divs:
-                if div.get('class'):
-                    class_name = ' '.join(div.get('class'))
-                    if any(keyword in class_name.lower() for keyword in ['goods', 'product', 'item', 'list']):
-                        print(f"DEBUG: 가능한 컨테이너: div.{class_name}")
-        
-        return None
-    
-    def _extract_manufacturer_from_row(self, row):
-        """goods-row에서 제조사를 추출합니다"""
-        try:
-            # goods.txt 구조: div.desc > h4.title > span.goodsname1
-            desc_div = row.find('div', class_='desc')
-            if not desc_div:
+            # 이름
+            name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+            name = self._extract_text(name_el)
+            if not name:
                 return None
-            
-            title_h4 = desc_div.find('h4', class_='title')
-            if not title_h4:
-                return None
-            
-            goodsname_span = title_h4.find('span', class_='goodsname1')
-            if not goodsname_span:
-                return None
-            
-            # 제품명에서 제조사 추출
-            product_name = goodsname_span.get_text(strip=True)
-            return self._extract_manufacturer(product_name)
-            
+            # 스펙
+            spec_el = row.select_one(".desc .feature")
+            specs = self._extract_text(spec_el)
+            # 가격
+            price_el = row.select_one(".prices .price-large span") or row.select_one(".price-large span")
+            price = self._parse_price(self._extract_text(price_el))
+            return Product(name=name, price=price, specifications=specs)
         except Exception:
             return None
-    
-    
-    def _format_manufacturer_list(self, manufacturers: set) -> List[Dict[str, str]]:
-        """제조사 set을 정렬된 리스트로 변환합니다"""
-        manufacturer_list = []
-        for manufacturer in sorted(manufacturers):
-            manufacturer_list.append({
-                'name': manufacturer,
-                'code': manufacturer.lower().replace(' ', '_').replace('.', '')
-            })
-        return manufacturer_list
-    
+
+    # ----------------------- Manufacturer helpers -----------------------
+    def _normalize_brand(self, text: str) -> str:
+        t = (text or "").lower()
+        t = re.sub(r"[\\s._/-]+", " ", t).strip()
+        aliases = {
+            "wd": "western digital",
+            "웨스턴 디지털": "western digital",
+            "에이수스": "asus",
+            "기가바이트": "gigabyte",
+            "조텍": "zotac",
+            "엔비디아": "nvidia",
+            "삼성": "삼성전자",
+            "samsung": "삼성전자",
+            "g skill": "gskill",
+        }
+        return aliases.get(t, t)
+
     def _extract_manufacturer(self, product_name: str) -> Optional[str]:
-        """
-        제품명에서 제조사를 추출합니다.
-        다양한 패턴을 고려하여 제조사를 정확하게 추출
-        """
         if not product_name:
             return None
-            
-        words = product_name.strip().split()
+        # [307842] 같은 코드 제거
+        text = re.sub(r"\[[^\]]+\]", " ", product_name)
+        text = re.sub(r"\s+", " ", text).strip()
+        words = text.split()
         if not words:
             return None
-        
-        print(f"DEBUG 제조사추출: 제품명='{product_name}', 분할된단어={words[:3]}")
-        
-        # 1. 첫 번째 단어가 수식어인 경우 제거
-        skip_words = ['신제품', '공식인증', '병행수입', '벌크', '정품']
-        start_index = 0
-        while start_index < len(words) and words[start_index] in skip_words:
-            start_index += 1
-        
-        if start_index >= len(words):
+        skip = {"신제품", "공식인증", "병행수입", "벌크", "정품", "스페셜", "한정판"}
+        i = 0
+        while i < len(words) and words[i] in skip:
+            i += 1
+        if i >= len(words):
             return None
-            
-        # 2. 복합 제조사명 처리 (예: "Western Digital")
-        manufacturer = words[start_index]
-        
-        # "Western Digital" 패턴 확인
-        if (start_index + 1 < len(words) and 
-            manufacturer.lower() == 'western' and 
-            words[start_index + 1].lower() == 'digital'):
-            manufacturer = f"{manufacturer} {words[start_index + 1]}"
-        
-        print(f"DEBUG: 추출된 제조사='{manufacturer}'")
+        manufacturer = words[i]
+        # Western Digital 두 단어 결합
+        if i + 1 < len(words):
+            pair = f"{manufacturer} {words[i+1]}"
+            if self._normalize_brand(pair) == "western digital":
+                manufacturer = pair
         return manufacturer
 
-    def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
-        """
-        가이드컴에서 제품을 검색합니다.
-        가이드컴은 제조사별 API 필터링이 없으므로 클라이언트 사이드에서 필터링
-        """
-        try:
-            # 데스크탑 버전 정렬 매핑 (dibugguid.txt에 따라)
-            order_map = {
-                "saveDESC": "event_goods",    # 추천상품 -> 행사상품
-                "opinionDESC": "reco_goods",  # 인기상품 -> 인기상품
-                "priceDESC": "price_0",       # 가격 높은순 -> 낮은가격순
-                "priceASC": "price_0"         # 가격 낮은순 -> 낮은가격순
-            }
-            
-            order = order_map.get(sort_type, "reco_goods")
-            
-            # 데스크탑 버전 파라미터
-            params = {
-                'keyword': keyword,
-                'order': order
-            }
-            
-            response = self._make_request(self.base_url, params=params)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            products = []
-            
-            # goods.txt 구조에 따른 파싱
-            goods_list = self._find_goods_list(soup)
-            if not goods_list:
-                return []
+    def _extract_manufacturer_from_row(self, row) -> Optional[str]:
+        name_el = row.select_one(".desc h4.title a") or row.select_one("h4.title a")
+        name = self._extract_text(name_el)
+        return self._extract_manufacturer(name)
 
-            # 더 많은 제품을 가져와서 필터링할 여지를 늘림 (최대 50개)
-            goods_rows = goods_list.find_all('div', class_='goods-row')
-            
-            filtered_count = 0
-            total_processed = 0
-            
-            print(f"DEBUG: 선택된 제조사 코드: {maker_codes}")
-            print(f"DEBUG: 총 제품 수: {len(goods_rows)}")
-            
-            for row in goods_rows:
-                if filtered_count >= limit:
-                    break
-                    
-                product = self._parse_product_item(row)
-                if product:
-                    total_processed += 1
-                    extracted_manufacturer = self._extract_manufacturer(product.name)
-                    
-                    # 제조사 필터링 적용
-                    is_match = self._filter_by_maker(product, maker_codes)
-                    
-                    if total_processed <= 5:  # 처음 5개만 디버깅
-                        print(f"DEBUG: 제품 {total_processed}: {product.name[:50]}...")
-                        print(f"DEBUG: 추출된 제조사: {extracted_manufacturer}")
-                        print(f"DEBUG: 필터링 결과: {is_match}")
-                    
-                    if is_match:
-                        products.append(product)
-                        filtered_count += 1
-            
-            print(f"DEBUG: 처리된 제품 수: {total_processed}")
-            print(f"DEBUG: 필터링된 제품 수: {filtered_count}")
-                    
-            return products
-            
-        except Exception as e:
-            print(f"제품 검색 오류: {e}")
-            return []
-    
     def _filter_by_maker(self, product: Product, maker_codes: List[str]) -> bool:
-        """
-        제조사 코드로 제품을 필터링합니다.
-        가이드컴 특성: 제품명의 첫 단어와 선택된 제조사를 매칭
-        """
-        # 제조사가 선택되지 않았으면 모든 제품 통과
         if not maker_codes:
             return True
-            
-        # 제품명에서 제조사 추출
         manufacturer = self._extract_manufacturer(product.name)
         if not manufacturer:
             return False
-        
-        print(f"DEBUG 필터링: 제품명='{product.name[:30]}...', 추출제조사='{manufacturer}', 선택코드={maker_codes}")
-        
-        # 간단한 매칭: 제조사명이 선택된 제조사 목록에 있는지 확인
-        manufacturer_lower = manufacturer.lower()
-        
-        for selected_code in maker_codes:
-            # 코드에서 제조사명 추출 (code는 name.lower().replace(' ', '_') 형태)
-            selected_name = selected_code.replace('_', ' ').lower()
-            
-            print(f"DEBUG: '{manufacturer_lower}' vs '{selected_name}' 비교")
-            
-            # 직접 매칭
-            if manufacturer_lower == selected_name:
-                print(f"DEBUG: 직접 매칭 성공!")
+        man_norm = self._normalize_brand(manufacturer)
+        sel_norms = [self._normalize_brand(code.replace("_", " ")) for code in maker_codes]
+        # 직접 일치 또는 포함
+        for sel in sel_norms:
+            if man_norm == sel or man_norm in sel or sel in man_norm:
                 return True
-            
-            # 부분 매칭 (제조사명이 포함되어 있는지)
-            if manufacturer_lower in selected_name or selected_name in manufacturer_lower:
-                print(f"DEBUG: 부분 매칭 성공!")
+        # 추가 별칭 쌍
+        brand_pairs = [
+            ("western digital", ["wd", "western", "digital"]),
+            ("삼성전자", ["samsung", "삼성"]),
+            ("asus", ["에이수스"]),
+            ("gigabyte", ["기가바이트"]),
+            ("zotac", ["조텍"]),
+            ("nvidia", ["엔비디아"]),
+        ]
+        for canonical, aliases in brand_pairs:
+            if man_norm == canonical and any(a == sel for sel in sel_norms for a in aliases):
                 return True
-        
-        print(f"DEBUG: 매칭 실패")
-        return False
-    
-    def _check_brand_alias(self, manufacturer: str, selected_code: str) -> bool:
-        """브랜드 별칭을 확인합니다"""
-        manufacturer_lower = manufacturer.lower()
-        selected_lower = selected_code.lower()
-        
-        # 한글-영문 매칭
-        brand_mapping = {
-            '삼성전자': ['samsung', 'samsung전자'],
-            '인텔': ['intel'],
-            'amd': ['amd'],
-            'nvidia': ['nvidia', '엔비디아'],
-            'msi': ['msi'],
-            'asus': ['asus', '에이수스'],
-            '기가바이트': ['gigabyte', 'gb'],
-            'evga': ['evga'],
-            'zotac': ['zotac', '조택'],
-            'sapphire': ['sapphire', '사파이어'],
-            'wd': ['wd', 'western', 'digital'],
-            'crucial': ['crucial', '크루셜'],
-            'kingston': ['kingston', '킹스톤'],
-            'corsair': ['corsair', '커세어'],
-            'g.skill': ['gskill', 'g_skill']
-        }
-        
-        # 제조사가 매핑에 있는지 확인
-        for brand, aliases in brand_mapping.items():
-            if brand in manufacturer_lower:
-                if any(alias in selected_lower for alias in aliases):
-                    return True
-            if brand in selected_lower:
-                if any(alias in manufacturer_lower for alias in aliases):
-                    return True
-        
+            if man_norm in aliases and any(sel == canonical for sel in sel_norms):
+                return True
         return False
 
-    def _parse_product_item(self, goods_row) -> Optional[Product]:
+    # ----------------------- Public API -----------------------
+    def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
-        goods.txt 구조에 최적화된 제품 정보 추출
-        dibugguid.txt 기준:
-        - 상품명: div.desc > h4.title > span.goodsname1  
-        - 가격: div.prices > div.price-large.price > span
-        - 스펙: div.desc > div.feature
+        검색 키워드로 1페이지를 스캔하여 제조사 후보를 최대 8개까지 반환합니다.
+        반환: [{"name": "...", "code": "..."}, ...]
         """
         try:
-            # 1. 상품명 추출 (goods.txt 라인 6, 25, 44 기준)
-            desc_div = goods_row.find('div', class_='desc')
-            if not desc_div:
-                return None
-            
-            title_h4 = desc_div.find('h4', class_='title')
-            if not title_h4:
-                return None
-                
-            goodsname_span = title_h4.find('span', class_='goodsname1')
-            if not goodsname_span:
-                return None
-                
-            # highlight 태그 포함한 전체 텍스트 추출
-            name = goodsname_span.get_text(strip=True)
-            
-            # 2. 가격 추출 (goods.txt 라인 12, 31, 50 기준)
-            prices_div = goods_row.find('div', class_='prices')
-            price = "가격 문의"
-            if prices_div:
-                price_large_div = prices_div.find('div', class_='price-large')
-                if price_large_div:
-                    price_span = price_large_div.find('span')
-                    if price_span and price_span.get_text(strip=True):
-                        raw_price = price_span.get_text(strip=True)
-                        # 숫자만 있는 경우 '원' 추가
-                        if raw_price.isdigit() or ',' in raw_price:
-                            price = raw_price + "원"
-                        else:
-                            price = raw_price
+            params = {"keyword": keyword}
+            resp = self._make_request(self.base_url, params=params)
+            soup = BeautifulSoup(resp.text, "lxml")
+            goods_list = self._find_goods_list(soup)
+            if not goods_list:
+                # 대체 URL 시도
+                for alt in self.alternative_urls:
+                    try:
+                        resp2 = self._make_request(alt, params=params)
+                        soup2 = BeautifulSoup(resp2.text, "lxml")
+                        goods_list = self._find_goods_list(soup2)
+                        if goods_list:
+                            break
+                    except Exception:
+                        continue
+            if not goods_list:
+                return []
+            manufacturers = []
+            seen = set()
+            rows = goods_list.find_all("div", class_="goods-row")
+            for row in rows[:60]:
+                maker = self._extract_manufacturer_from_row(row)
+                if maker:
+                    if maker not in seen:
+                        manufacturers.append(maker)
+                        seen.add(maker)
+                if len(manufacturers) >= 8:
+                    break
+            # 보기 좋게 정렬(한글 우선)
+            def sort_key(x: str):
+                xn = self._normalize_brand(x)
+                return (0 if re.search(r"[가-힣]", x) else 1, xn)
+            result = [{"name": m, "code": self._normalize_brand(m).replace(" ", "_")} for m in sorted(manufacturers, key=sort_key)]
+            return result
+        except Exception:
+            return []
 
-            # 3. 스펙 정보 추출 (goods.txt 라인 7, 26, 45 기준)
-            specifications = "사양 정보 없음"
-            feature_div = desc_div.find('div', class_='feature')
-            if feature_div:
-                # dibugguid.txt: 스펙 정보를 ' / '로 구분
-                full_text = feature_div.get_text(separator=' / ', strip=True)
-                if full_text and len(full_text) > 10:  # 의미있는 스펙 정보만
-                    specifications = full_text
-            
-            return Product(name=name, price=price, specifications=specifications)
-            
-        except Exception as e:
-            print(f"제품 파싱 오류: {e}")
-            return None
+    def _resolve_order_param(self, sort_type: str) -> str:
+        """
+        들어온 sort_type을 guidecom의 order 파라미터로 변환합니다.
+        허용 입력 예:
+          - 'price_0' / '낮은가격' / 'priceASC'
+          - 'reco_goods' / '인기상품' / 'opinionDESC'
+          - 'event_goods' / '행사상품' / 'saveDESC'
+        """
+        mapping = {
+            "price_0": "price_0",
+            "낮은가격": "price_0",
+            "priceasc": "price_0",
+            "reco_goods": "reco_goods",
+            "인기상품": "reco_goods",
+            "opiniondesc": "reco_goods",
+            "event_goods": "event_goods",
+            "행사상품": "event_goods",
+            "savedesc": "event_goods",
+        }
+        k = (sort_type or "").lower()
+        return mapping.get(k, "reco_goods")
+
+    def search_products(self, keyword: str, sort_type: str, maker_codes: List[str], limit: int = 5) -> List[Product]:
+        """
+        단일 정렬 기준으로 상품을 최대 `limit`개까지 반환합니다.
+        """
+        try:
+            order = self._resolve_order_param(sort_type)
+            params = {"keyword": keyword, "order": order}
+            resp = self._make_request(self.base_url, params=params)
+            soup = BeautifulSoup(resp.text, "lxml")
+            goods_list = self._find_goods_list(soup)
+            if not goods_list:
+                return []
+            rows = goods_list.find_all("div", class_="goods-row")
+            out: List[Product] = []
+            for row in rows:
+                p = self._parse_product_item(row)
+                if not p:
+                    continue
+                if not self._filter_by_maker(p, maker_codes):
+                    continue
+                out.append(p)
+                if len(out) >= limit:
+                    break
+            return out
+        except Exception:
+            return []
 
     def get_unique_products(self, keyword: str, maker_codes: List[str]) -> List[Product]:
-        """danawa.py와 동일한 인터페이스를 제공합니다."""
-        recommended_products = self.search_products(keyword, "saveDESC", maker_codes, limit=5)
-        top_rated_products = self.search_products(keyword, "opinionDESC", maker_codes, limit=5)
-
-        all_products = recommended_products + top_rated_products
-        
-        unique_products = []
+        """
+        요구사항:
+        - 낮은가격 3개 + 인기상품 4개 + 행사상품 3개 = 총 10개
+        - 전부 중복 없이
+        """
+        buckets: List[Tuple[str, int]] = [
+            ("price_0", 3),     # 낮은가격
+            ("reco_goods", 4),  # 인기상품
+            ("event_goods", 3), # 행사상품
+        ]
+        results: List[Product] = []
         seen_names = set()
-        for product in all_products:
-            if product.name not in seen_names:
-                unique_products.append(product)
-                seen_names.add(product.name)
-        
-        return unique_products
+
+        for order, want in buckets:
+            # 충분히 많이 가져와서 중복 제외 후 quota를 맞춘다
+            candidates = self.search_products(keyword, order, maker_codes, limit=30)
+            taken = 0
+            for p in candidates:
+                if p.name in seen_names:
+                    continue
+                results.append(p)
+                seen_names.add(p.name)
+                taken += 1
+                if taken >= want:
+                    break
+
+        # 최종 10개(부족하면 있는 만큼 반환)
+        return results[:10]

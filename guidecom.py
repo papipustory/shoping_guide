@@ -164,7 +164,7 @@ class GuidecomParser:
         self._dbg(f"All {retries} attempts failed")
         raise last_exc if last_exc else RuntimeError("요청 실패")
 
-    def _post_list(self, keyword: str, order: str, page: int = 1, lpp: int = 30) -> Optional[BeautifulSoup]:
+    def _post_list(self, keyword: str, order: str, page: int = 1, lpp: int = 30, use_computer_parts_filter: bool = True) -> Optional[BeautifulSoup]:
         """list.php로 직접 POST하여 goods-row HTML 조각을 받는다."""
         try:
             self._update_headers()
@@ -172,6 +172,57 @@ class GuidecomParser:
             referer = f"https://www.guidecom.co.kr/search/?keyword={quote_plus(keyword)}&order={order}"
             headers = {"Referer": referer}
             data = {"keyword": keyword, "order": order, "lpp": lpp, "page": page, "y": 0}
+            
+            # 컴퓨터주요부품 카테고리 필터 적용
+            if use_computer_parts_filter:
+                # 키워드에 따라 관련성 높은 카테고리부터 시도
+                keyword_lower = keyword.lower()
+                
+                # 카테고리 우선순위 매핑
+                if any(k in keyword_lower for k in ["ssd", "하드", "디스크"]):
+                    priority_categories = ["8855", "8804"]  # SSD, HDD 우선
+                elif any(k in keyword_lower for k in ["그래픽", "gpu", "rtx", "gtx"]):
+                    priority_categories = ["8803"]  # 그래픽카드 우선
+                elif any(k in keyword_lower for k in ["메모리", "ram", "ddr"]):
+                    priority_categories = ["8802"]  # 메모리 우선
+                elif any(k in keyword_lower for k in ["cpu", "프로세서", "intel", "amd"]):
+                    priority_categories = ["8800"]  # CPU 우선
+                elif any(k in keyword_lower for k in ["메인보드", "마더보드", "motherboard"]):
+                    priority_categories = ["8801"]  # 메인보드 우선
+                else:
+                    # 일반 검색: 주요 컴퓨터 부품 카테고리들
+                    priority_categories = ["8855", "8803", "8802", "8800", "8801", "8804"]
+                
+                self._dbg(f"Priority categories for '{keyword}': {priority_categories}")
+                
+                # 우선순위 카테고리부터 검색
+                for cid in priority_categories:
+                    try:
+                        data_with_cid = data.copy()
+                        data_with_cid["cid"] = cid
+                        self._dbg(f"POST {self.list_url} with cid={cid}")
+                        resp = self.session.post(self.list_url, data=data_with_cid, headers=headers, timeout=30)
+                        self._fix_encoding(resp)
+                        
+                        if resp.status_code == 200 and len(resp.text) > 100:
+                            soup = BeautifulSoup(resp.text, "lxml")
+                            rows = soup.find_all("div", class_="goods-row")
+                            self._dbg(f"Category {cid}: found {len(rows)} products")
+                            
+                            if len(rows) > 0:  # 결과가 있으면 바로 사용
+                                self._dbg(f"Using category {cid} with {len(rows)} products")
+                                return soup
+                                
+                        # 카테고리별 요청 간격
+                        self._wait_between_requests(0.1)
+                        
+                    except Exception as e:
+                        self._dbg(f"Category {cid} failed: {e}")
+                        continue
+                
+                self._dbg("No results found in priority categories, trying fallback")
+            
+            # 컴퓨터 부품 필터가 결과를 못 찾거나 비활성화된 경우 기본 검색
             self._dbg(f"POST {self.list_url} data={data} referer={referer}")
             resp = self.session.post(self.list_url, data=data, headers=headers, timeout=30)
             self._fix_encoding(resp)
@@ -195,7 +246,8 @@ class GuidecomParser:
     def _try_alternative_methods(self, keyword: str, order: str) -> Optional[BeautifulSoup]:
         """다양한 방법으로 상품 데이터 가져오기 시도"""
         methods = [
-            ("POST list.php", lambda: self._post_list(keyword, order)),
+            ("POST list.php with computer parts filter", lambda: self._post_list(keyword, order, use_computer_parts_filter=True)),
+            ("POST list.php", lambda: self._post_list(keyword, order, use_computer_parts_filter=False)),
             ("GET with params", lambda: self._get_with_params(keyword, order)),
             ("Alternative URLs", lambda: self._try_alternative_urls(keyword, order))
         ]

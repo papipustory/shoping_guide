@@ -17,11 +17,14 @@ Guidecom 상품 검색/파싱 모듈 (app.py 수정 없이 사용)
 - 디버깅: 환경변수 GUIDECOM_DEBUG=1 이면 상세 로그를 콘솔(스트림릿 로그)로 출력
 """
 
+# Product 클래스 정의
 @dataclass
 class Product:
     name: str
     price: str
     specifications: str
+    product_link: str = ""
+    site: str = ""  # "컴퓨존" 또는 "가이드컴"
 
 class GuidecomParser:
     def __init__(self) -> None:
@@ -87,20 +90,12 @@ class GuidecomParser:
 
     def _fix_encoding(self, resp: requests.Response) -> None:
         try:
-            # 가이드컴은 EUC-KR 사용, 명시적으로 설정
-            if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "utf-8"):
-                # Content-Type에서 charset 확인
-                content_type = resp.headers.get('content-type', '').lower()
-                if 'euc-kr' in content_type:
-                    resp.encoding = 'euc-kr'
-                elif 'charset=euc-kr' in resp.text[:1000].lower():
-                    resp.encoding = 'euc-kr'
-                else:
-                    resp.encoding = resp.apparent_encoding or 'euc-kr'  # 기본값을 euc-kr로
-            self._dbg(f"Final encoding set to: {resp.encoding}")
+            # 가이드컴은 EUC-KR 사용, 항상 EUC-KR로 설정
+            resp.encoding = 'euc-kr'
+            self._dbg(f"Encoding set to: {resp.encoding}")
         except Exception as e:
             self._dbg(f"Encoding fix failed: {e}")
-            resp.encoding = 'euc-kr'  # 안전한 기본값
+            resp.encoding = 'euc-kr'
 
     def _make_request(self, url: str, params: Optional[Dict[str, str]] = None, retries: int = 5) -> requests.Response:
         last_exc = None
@@ -170,7 +165,10 @@ class GuidecomParser:
             self._update_headers()
             self._wait_between_requests()
             referer = f"https://www.guidecom.co.kr/search/?keyword={quote_plus(keyword)}&order={order}"
-            headers = {"Referer": referer}
+            headers = {
+                "Referer": referer,
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
             data = {"keyword": keyword, "order": order, "lpp": lpp, "page": page, "y": 0}
             
             # 컴퓨터주요부품 카테고리 필터 적용
@@ -178,191 +176,32 @@ class GuidecomParser:
                 # 키워드에 따라 관련성 높은 카테고리부터 시도
                 keyword_lower = keyword.lower()
                 
-                # 카테고리 우선순위 매핑 (완벽한 키워드 매핑)
+                # 키워드 기반 카테고리 우선순위 매핑 (확장된 버전)
+                category_map = {
+                    "8800": ["cpu", "프로세서", "processor", "intel", "amd", "라이젠", "ryzen", "인텔", "셀러론", "celeron", "펜티엄", "pentium", "코어", "core", "i3", "i5", "i7", "i9", "xeon", "제온", "athlon", "애슬론"],
+                    "8801": ["메인보드", "마더보드", "motherboard", "mainboard", "보드", "board", "x570", "b550", "b450", "z490", "z590", "lga", "am4", "am5"],  
+                    "8802": ["메모리", "ram", "ddr", "ddr4", "ddr5", "ddr6", "dimm", "삼성램", "하이닉스", "corsair", "gskill", "crucial", "kingston"],
+                    "8803": ["그래픽", "그래픽카드", "gpu", "vga", "rtx", "gtx", "radeon", "rx", "nvidia", "엔비디아", "amd", "geforce", "지포스", "비디오카드"],
+                    "8804": ["hdd", "하드디스크", "하드", "hard disk", "western digital", "wd", "seagate", "시게이트", "toshiba", "도시바", "hitachi", "히타치", "barracuda"],
+                    "8855": ["ssd", "solid state", "nvme", "m.2", "sata ssd", "crucial", "samsung", "삼성", "990pro", "980pro", "970evo"],
+                    "8806": ["파워", "power", "psu", "파워서플라이", "전원공급장치", "80plus", "정격", "모듈러", "modular", "seasonic", "corsair"],
+                    "8807": ["케이스", "case", "컴퓨터케이스", "pc케이스", "타워", "tower", "미들타워", "풀타워", "atx", "mini-itx"],
+                    "8805": ["쿨러", "cooler", "cpu쿠러", "프로세서쿨러", "수랭", "수냉", "공랭", "공냉", "타워쿨러", "라디에이터", "noctua", "녹투아"],
+                    "8808": ["모니터", "monitor", "디스플레이", "display", "lcd", "led", "24인치", "27인치", "144hz", "4k", "게이밍"],
+                    "8809": ["키보드", "keyboard", "기계식", "mechanical", "텐키리스", "tkl", "무선", "rgb", "청축", "갈축", "적축"],
+                    "8810": ["마우스", "mouse", "게이밍마우스", "gaming mouse", "무선마우스", "광마우스", "dpi", "로지텍", "razer"]
+                }
                 
-                # CPU 관련 키워드
-                cpu_keywords = [
-                    "cpu", "프로세서", "processor", "intel", "amd", "라이젠", "ryzen", "인텔", 
-                    "셀러론", "celeron", "펜티엄", "pentium", "코어", "core", "i3", "i5", "i7", "i9",
-                    "xeon", "제온", "athlon", "애슬론", "fx", "threadripper", "쓰레드리퍼",
-                    # AMD 라이젠 최신 (9000, 8000, 7000, 5000 시리즈)
-                    "9950x", "9900x", "9700x", "9600x", "8700g", "8600g", "8500g", "8300g",
-                    "7950x3d", "7900x3d", "7800x3d", "7950x", "7900x", "7700x", "7600x", 
-                    "5950x", "5900x", "5800x3d", "5800x", "5700x", "5600x",
-                    # 인텔 최신 (15세대, 14세대, 13세대, 12세대)
-                    "15900k", "15700k", "15600k", "15400", "285k", "265k", "245k", # 15세대 Ultra
-                    "14900k", "14700k", "14600k", "14400", "14100", # 14세대
-                    "13900k", "13700k", "13600k", "13500", "13400", "13100", # 13세대
-                    "12900k", "12700k", "12600k", "12400", "12100", # 12세대
-                    "ultra", "울트라" # 인텔 Ultra 시리즈
-                ]
+                # 키워드 매칭으로 우선순위 카테고리 결정
+                priority_categories = []
+                for cid, keywords in category_map.items():
+                    if any(k in keyword_lower for k in keywords):
+                        priority_categories.append(cid)
+                        break  # 첫 번째 매치만 사용
                 
-                # 메인보드 관련 키워드
-                motherboard_keywords = [
-                    "메인보드", "마더보드", "motherboard", "mainboard", "보드", "board", 
-                    # AMD 최신 소켓 (AM5, AM4)
-                    "x870", "x870e", "b850", "b840", "a820", # AM5 최신 칩셋
-                    "x670", "x670e", "b650", "b650e", "a620", # AM5 이전 칩셋
-                    "x570", "b550", "b450", "a520", # AM4 칩셋
-                    # 인텔 최신 소켓 (LGA1700, LGA1200)
-                    "z890", "h870", "b860", # LGA1851 (15세대 예상)
-                    "z790", "z690", "h770", "h670", "b760", "b660", "h610", # LGA1700 (12-14세대)
-                    "z590", "z490", "h570", "h470", "b560", "b460", "h410", # LGA1200 (10-11세대)
-                    # 소켓 정보
-                    "lga1851", "lga1700", "lga1200", "am5", "am4", "socket"
-                ]
-                
-                # 메모리 관련 키워드
-                memory_keywords = [
-                    "메모리", "ram", "ddr", "ddr4", "ddr5", "ddr6", "dimm", "sodimm", "삼성램", "하이닉스",
-                    "corsair", "gskill", "crucial", "kingston", "팀그룹", "teamgroup", "g.skill",
-                    # DDR5 최신 속도 (고속)
-                    "8000", "7800", "7600", "7200", "7000", "6800", "6400", "6200", "6000", "5600", "5200", "4800",
-                    # DDR4 속도
-                    "4000", "3800", "3600", "3466", "3200", "3000", "2933", "2666", "2400",
-                    # 레이턴시
-                    "cl36", "cl34", "cl32", "cl30", "cl28", "cl26", "cl24", "cl22", "cl20", "cl18", "cl16", "cl14",
-                    # 브랜드 시리즈
-                    "vengeance", "trident", "ripjaws", "ballistix", "fury", "dominator", "neo", "royal"
-                ]
-                
-                # 그래픽카드 관련 키워드
-                gpu_keywords = [
-                    "그래픽", "그래픽카드", "gpu", "vga", "비디오카드", "video card", "graphics card",
-                    "rtx", "gtx", "radeon", "rx", "nvidia", "엔비디아", "amd", "geforce", "지포스",
-                    # NVIDIA RTX 최신 (50시리즈, 40시리즈, 30시리즈)
-                    "5090", "5080", "5070", "5060", "rtx5090", "rtx5080", "rtx5070", "rtx5060", # 50시리즈 최신
-                    "4090", "4080", "4070", "4060", "rtx4090", "rtx4080", "rtx4070", "rtx4060", # 40시리즈
-                    "4070ti", "4060ti", "rtx4070ti", "rtx4060ti", "rtx4070super", "rtx4080super",
-                    "3090", "3080", "3070", "3060", "rtx3090", "rtx3080", "rtx3070", "rtx3060", # 30시리즈
-                    "3090ti", "3080ti", "3070ti", "3060ti", "rtx3090ti", "rtx3080ti", "rtx3070ti", "rtx3060ti",
-                    # AMD Radeon 최신 (8000, 7000, 6000 시리즈)
-                    "8800xt", "8700xt", "8600xt", "rx8800", "rx8700", "rx8600", # 8000시리즈 (예상)
-                    "7900xt", "7900xtx", "7800xt", "7700xt", "7600xt", "7600", # 7000시리즈
-                    "rx7900", "rx7800", "rx7700", "rx7600", "rx7900xt", "rx7900xtx", "rx7800xt", "rx7700xt",
-                    "6950xt", "6900xt", "6800xt", "6700xt", "6600xt", "6600", "6500xt", "6400", # 6000시리즈
-                    "rx6950", "rx6900", "rx6800", "rx6700", "rx6600", "rx6500", "rx6400",
-                    # 기타
-                    "gtx1660", "gtx1650", "arc", "인텔arc", "아크", "a770", "a750", "a580", "titan"
-                ]
-                
-                # HDD 관련 키워드  
-                hdd_keywords = [
-                    "hdd", "하드디스크", "하드", "hard disk", "hard drive", "wd", "western digital",
-                    "seagate", "시게이트", "toshiba", "도시바", "hitachi", "히타치", "barracuda", 
-                    "blue", "black", "red", "purple", "gold", "ironwolf", "skyhawk"
-                ]
-                
-                # SSD 관련 키워드
-                ssd_keywords = [
-                    "ssd", "solid state", "nvme", "m.2", "sata ssd", "2.5인치", 
-                    "crucial", "mx", "bx", "samsung", "삼성", "kingston", "adata", "transcend",
-                    # 삼성 최신 라인업
-                    "990pro", "990evo", "980pro", "980", "970evo", "980evo", 
-                    # WD 최신 라인업
-                    "sn850x", "sn770", "sn580", "sn570", "black", "blue", "green",
-                    # 크루셜 최신
-                    "t700", "t500", "p5", "p3", "mx500", "bx500",
-                    # 기타 브랜드 최신
-                    "mp600", "mp510", "mp700", "fury", "kc3000", "kc2500",
-                    # 규격 및 성능
-                    "pcie", "gen3", "gen4", "gen5", "tlc", "qlc", "mlc", "slc", "dram", "dramless",
-                    "7000mb", "5000mb", "3500mb" # 읽기 속도
-                ]
-                
-                # 파워 관련 키워드
-                power_keywords = [
-                    "파워", "power", "psu", "파워서플라이", "power supply", "전원공급장치", "정격",
-                    # 인증 등급
-                    "80plus", "bronze", "silver", "gold", "platinum", "titanium", "cybenetics",
-                    # 모듈러 타입
-                    "모듈러", "modular", "풀모듈러", "세미모듈러", "논모듈러",
-                    # 최신 규격
-                    "atx3.0", "atx3.1", "pcie5.0", "12vhpwr", "16pin", "12+4pin",
-                    # 용량별
-                    "550w", "650w", "750w", "850w", "1000w", "1200w", "1600w",
-                    # 브랜드
-                    "seasonic", "시소닉", "corsair", "antec", "안텍", "fsp", "쿨러마스터", "silverstone",
-                    "evga", "thermaltake", "be quiet", "fractal", "msi", "asus", "gigabyte"
-                ]
-                
-                # 케이스 관련 키워드
-                case_keywords = [
-                    "케이스", "case", "컴퓨터케이스", "pc케이스", "타워", "tower", "미들타워", "풀타워",
-                    "미니itx", "mini-itx", "micro-atx", "atx", "e-atx", "큐브", "슬림",
-                    "fractal", "nzxt", "corsair", "쿨러마스터", "써마테이크", "thermaltake",
-                    "define", "meshify", "h510", "4000d", "5000d", "view", "rgb", "tempered glass"
-                ]
-                
-                # CPU 쿨러 관련 키워드
-                cpu_cooler_keywords = [
-                    "cpu쿨러", "cpu 쿨러", "cpucooler", "프로세서쿨러", "공랭쿨러", "공냉쿨러", 
-                    "타워쿨러", "tower cooler", "top flow", "탑플로우", "사이드플로우", "side flow",
-                    "noctua", "녹투아", "be quiet", "비콰이어트", "zalman", "잘만", "deepcool", "딥쿨"
-                ]
-                
-                # 수랭쿨러 관련 키워드  
-                liquid_cooler_keywords = [
-                    "수랭쿨러", "수냉쿨러", "수랭", "수냉", "liquid cooler", "aio", "올인원", "라디에이터",
-                    "240mm", "280mm", "360mm", "corsair", "nzxt", "써마테이크", "쿨러마스터",
-                    "arctic", "아틱", "msi", "asus"
-                ]
-                
-                # 모니터 관련 키워드
-                monitor_keywords = [
-                    "모니터", "monitor", "디스플레이", "display", "lcd", "led", "oled", "qled",
-                    "24인치", "27인치", "32인치", "144hz", "165hz", "240hz", "360hz",
-                    "4k", "2k", "1440p", "1080p", "울트라와이드", "ultrawide", "커브드",
-                    "gaming", "게이밍", "ips", "va", "tn"
-                ]
-                
-                # 키보드 관련 키워드
-                keyboard_keywords = [
-                    "키보드", "keyboard", "기계식", "mechanical", "멤브레인", "membrane",
-                    "텐키리스", "tkl", "60%", "65%", "75%", "풀배열", "무선", "wireless",
-                    "rgb", "백라이트", "청축", "갈축", "적축", "저소음", "게이밍"
-                ]
-                
-                # 마우스 관련 키워드
-                mouse_keywords = [
-                    "마우스", "mouse", "게이밍마우스", "gaming mouse", "무선마우스", "wireless mouse",
-                    "광마우스", "optical", "레이저", "laser", "dpi", "rgb", "매크로",
-                    "로지텍", "logitech", "레이저", "razer", "스틸시리즈", "steelseries"
-                ]
-                
-                # 키워드 우선순위 매칭
-                if any(k in keyword_lower for k in cpu_keywords):
-                    priority_categories = ["8800"]  # CPU
-                elif any(k in keyword_lower for k in motherboard_keywords):
-                    priority_categories = ["8801"]  # 메인보드
-                elif any(k in keyword_lower for k in memory_keywords):
-                    priority_categories = ["8802"]  # 메모리
-                elif any(k in keyword_lower for k in gpu_keywords):
-                    priority_categories = ["8803"]  # 그래픽카드
-                elif any(k in keyword_lower for k in hdd_keywords):
-                    priority_categories = ["8804"]  # HDD
-                elif any(k in keyword_lower for k in ssd_keywords):
-                    priority_categories = ["8855"]  # SSD
-                elif any(k in keyword_lower for k in power_keywords):
-                    priority_categories = ["8806"]  # 파워서플라이
-                elif any(k in keyword_lower for k in case_keywords):
-                    priority_categories = ["8807"]  # 케이스
-                elif any(k in keyword_lower for k in cpu_cooler_keywords):
-                    priority_categories = ["8805"]  # CPU쿨러
-                elif any(k in keyword_lower for k in liquid_cooler_keywords):
-                    priority_categories = ["8805"]  # CPU쿨러 (수랭도 동일 카테고리)
-                elif any(k in keyword_lower for k in monitor_keywords):
-                    priority_categories = ["8808"]  # 모니터
-                elif any(k in keyword_lower for k in keyboard_keywords):
-                    priority_categories = ["8809"]  # 키보드
-                elif any(k in keyword_lower for k in mouse_keywords):
-                    priority_categories = ["8810"]  # 마우스
-                elif "디스크" in keyword_lower and not any(k in keyword_lower for k in hdd_keywords):
-                    # "디스크"만 있고 HDD 관련 키워드가 없는 경우
-                    priority_categories = ["8855", "8804"]  # SSD 먼저, 그다음 HDD
-                else:
-                    # 일반 검색: 주요 컴퓨터 부품 카테고리들 (사용 빈도 순)
-                    priority_categories = ["8803", "8800", "8855", "8802", "8801", "8804", "8806", "8807", "8805", "8808", "8809", "8810"]
+                # 매치되는 카테고리가 없으면 주요 부품 카테고리들 사용
+                if not priority_categories:
+                    priority_categories = ["8855", "8803", "8802", "8800", "8801", "8804"]
                 
                 self._dbg(f"Priority categories for '{keyword}': {priority_categories}")
                 
@@ -380,14 +219,9 @@ class GuidecomParser:
                             rows = soup.find_all("div", class_="goods-row")
                             self._dbg(f"Category {cid}: found {len(rows)} products")
                             
-                            if len(rows) > 0:
-                                # 검색 결과 품질 검증
-                                if self._is_relevant_results(rows, keyword_lower):
-                                    self._dbg(f"Using category {cid} with {len(rows)} relevant products")
-                                    return soup
-                                else:
-                                    self._dbg(f"Category {cid} results not relevant, trying next category")
-                                    continue
+                            if len(rows) > 0:  # 결과가 있으면 바로 사용
+                                self._dbg(f"Using category {cid} with {len(rows)} products")
+                                return soup
                                 
                         # 카테고리별 요청 간격
                         self._wait_between_requests(0.1)
@@ -419,199 +253,11 @@ class GuidecomParser:
             return None
         return None
     
-    def _is_relevant_results(self, rows, keyword_lower: str) -> bool:
-        """검색 결과가 키워드와 관련성이 높은지 검증"""
-        if not rows:
-            return False
-            
-        relevant_count = 0
-        total_checked = min(len(rows), 5)  # 상위 5개 제품만 검사
-        
-        for row in rows[:total_checked]:
-            try:
-                # 제품명 추출
-                name_el = row.select_one(".desc .goodsname1") or row.select_one(".desc h4.title a") or row.select_one("h4.title a")
-                product_name = self._extract_text(name_el).lower()
-                
-                # 스펙 정보 추출
-                spec_el = row.select_one(".desc .feature")
-                specs = self._extract_text(spec_el).lower() if spec_el else ""
-                
-                full_text = f"{product_name} {specs}"
-                self._dbg(f"Checking relevance: '{product_name[:50]}...'")
-                
-                # 카테고리별 상세 관련성 검증
-                
-                # CPU 관련성 체크
-                if any(k in keyword_lower for k in ["cpu", "프로세서", "intel", "amd", "라이젠", "ryzen", "ultra", "울트라"]):
-                    cpu_check_keywords = [
-                        "cpu", "프로세서", "processor", "intel", "amd", "ryzen", "라이젠", "코어", "core", 
-                        "i3", "i5", "i7", "i9", "celeron", "pentium", "xeon", "athlon", "ultra", "울트라",
-                        # 최신 모델명
-                        "9950x", "9900x", "7800x3d", "7950x", "15900k", "14900k", "13900k", "285k", "265k"
-                    ]
-                    exclude_keywords = ["쿨러", "cooler", "케이스", "보드"]
-                    
-                    has_cpu_keyword = any(keyword in full_text for keyword in cpu_check_keywords)
-                    has_exclude_keyword = any(keyword in full_text for keyword in exclude_keywords)
-                    
-                    if has_cpu_keyword and not has_exclude_keyword:
-                        relevant_count += 1
-                
-                # 메인보드 관련성 체크
-                elif any(k in keyword_lower for k in ["메인보드", "마더보드", "motherboard", "보드"]):
-                    mb_check_keywords = ["메인보드", "마더보드", "motherboard", "mainboard", "보드", "b450", "b550", "x570", "z490", "z590", "lga", "am4", "am5"]
-                    if any(keyword in full_text for keyword in mb_check_keywords):
-                        relevant_count += 1
-                
-                # 메모리 관련성 체크
-                elif any(k in keyword_lower for k in ["메모리", "ram", "ddr"]):
-                    memory_check_keywords = ["메모리", "ram", "ddr", "ddr4", "ddr5", "dimm", "gb", "삼성", "하이닉스", "corsair", "gskill", "crucial"]
-                    exclude_keywords = ["ssd", "hdd", "그래픽"]
-                    
-                    has_memory_keyword = any(keyword in full_text for keyword in memory_check_keywords)
-                    has_exclude_keyword = any(keyword in full_text for keyword in exclude_keywords)
-                    
-                    if has_memory_keyword and not has_exclude_keyword:
-                        relevant_count += 1
-                
-                # 그래픽카드 관련성 체크
-                elif any(k in keyword_lower for k in ["그래픽", "gpu", "rtx", "gtx", "vga", "5090", "5080", "5070", "5060"]):
-                    gpu_check_keywords = [
-                        "그래픽", "gpu", "rtx", "gtx", "radeon", "rx", "nvidia", "amd", "geforce", "지포스", "vga", "비디오카드",
-                        # 최신 모델명
-                        "5090", "5080", "5070", "5060", "4090", "4080", "4070", "7900xt", "7800xt", "arc"
-                    ]
-                    if any(keyword in full_text for keyword in gpu_check_keywords):
-                        relevant_count += 1
-                
-                # HDD 관련성 체크 (더 엄격하게)
-                elif any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
-                    # 실제 HDD 브랜드와 모델 키워드
-                    real_hdd_keywords = [
-                        "western digital", "wd", "seagate", "toshiba", "도시바", "hitachi", 
-                        "barracuda", "blue", "red", "purple", "black", "gold", "ironwolf", "skyhawk",
-                        "ultrastar", "exos", "firecuda", "nas", "surveillance"
-                    ]
-                    
-                    # HDD 기본 키워드
-                    basic_hdd_keywords = ["hdd", "하드디스크", "하드", "hard disk", "sata3", "rpm"]
-                    
-                    # 주변기기/액세서리 키워드 (배제 대상)
-                    peripheral_keywords = [
-                        "케이스", "컨버터", "외장", "usb", "어댑터", "독", "dock", "enclosure",
-                        "인클로저", "변환", "커넥터", "connector", "bridge", "브릿지",
-                        "to", "ide", "usb3.0", "usb2.0", "type-a", "type-c"
-                    ]
-                    
-                    has_real_hdd = any(keyword in full_text for keyword in real_hdd_keywords)
-                    has_basic_hdd = any(keyword in full_text for keyword in basic_hdd_keywords)
-                    has_peripheral = any(keyword in full_text for keyword in peripheral_keywords)
-                    
-                    # 용량 정보 확인 (실제 HDD 용량 표기)
-                    capacity_keywords = ["tb", "테라", "tera", "gb", "기가"]
-                    has_capacity = any(keyword in full_text for keyword in capacity_keywords)
-                    
-                    # 엄격한 HDD 판정 기준
-                    if has_real_hdd and has_basic_hdd and not has_peripheral:
-                        # 확실한 HDD 브랜드 + HDD 키워드 + 주변기기 아님
-                        relevant_count += 1
-                        self._dbg(f"HDD relevant: Real brand + HDD keywords, no peripheral")
-                    elif has_basic_hdd and has_capacity and not has_peripheral:
-                        # HDD 키워드 + 용량 정보 + 주변기기 아님 (단, 더 엄격하게)
-                        # 추가 조건: PC용, NAS용, CCTV용 등 용도 명시
-                        usage_keywords = ["pc용", "nas용", "cctv용", "desktop", "enterprise", "surveillance"]
-                        has_usage = any(keyword in full_text for keyword in usage_keywords)
-                        
-                        if has_usage:
-                            relevant_count += 1
-                            self._dbg(f"HDD relevant: HDD + capacity + usage, no peripheral")
-                        else:
-                            self._dbg(f"HDD not relevant: Missing usage specification")
-                    else:
-                        self._dbg(f"HDD not relevant: has_real={has_real_hdd}, has_basic={has_basic_hdd}, has_peripheral={has_peripheral}")
-                
-                # SSD 관련성 체크
-                elif any(k in keyword_lower for k in ["ssd", "nvme", "m.2"]):
-                    ssd_check_keywords = ["ssd", "solid state", "nvme", "m.2", "sata ssd", "980", "970", "crucial", "mx", "bx", "samsung", "tb", "gb"]
-                    exclude_keywords = ["hdd", "케이스"]
-                    
-                    has_ssd_keyword = any(keyword in full_text for keyword in ssd_check_keywords)
-                    has_exclude_keyword = any(keyword in full_text for keyword in exclude_keywords)
-                    
-                    if has_ssd_keyword and not has_exclude_keyword:
-                        relevant_count += 1
-                
-                # 파워서플라이 관련성 체크
-                elif any(k in keyword_lower for k in ["파워", "power", "psu"]):
-                    power_check_keywords = ["파워", "power", "psu", "파워서플라이", "전원공급", "80plus", "정격", "w", "watt", "모듈러", "seasonic", "corsair"]
-                    exclude_keywords = ["그래픽", "케이스"]
-                    
-                    has_power_keyword = any(keyword in full_text for keyword in power_check_keywords)
-                    has_exclude_keyword = any(keyword in full_text for keyword in exclude_keywords)
-                    
-                    if has_power_keyword and not has_exclude_keyword:
-                        relevant_count += 1
-                
-                # 케이스 관련성 체크
-                elif any(k in keyword_lower for k in ["케이스", "case"]):
-                    case_check_keywords = ["케이스", "case", "컴퓨터케이스", "pc케이스", "타워", "tower", "atx", "mini-itx", "micro-atx"]
-                    if any(keyword in full_text for keyword in case_check_keywords):
-                        relevant_count += 1
-                
-                # 쿨러 관련성 체크
-                elif any(k in keyword_lower for k in ["쿨러", "cooler", "수랭", "수냉"]):
-                    cooler_check_keywords = ["쿨러", "cooler", "cpu쿨러", "수랭", "수냉", "공랭", "공냉", "라디에이터", "240mm", "280mm", "360mm", "noctua", "be quiet"]
-                    if any(keyword in full_text for keyword in cooler_check_keywords):
-                        relevant_count += 1
-                        
-                # 모니터 관련성 체크
-                elif any(k in keyword_lower for k in ["모니터", "monitor", "디스플레이"]):
-                    monitor_check_keywords = ["모니터", "monitor", "디스플레이", "display", "인치", "hz", "144hz", "4k", "1440p", "게이밍", "ips", "va"]
-                    if any(keyword in full_text for keyword in monitor_check_keywords):
-                        relevant_count += 1
-                        
-                # 키보드 관련성 체크
-                elif any(k in keyword_lower for k in ["키보드", "keyboard"]):
-                    keyboard_check_keywords = ["키보드", "keyboard", "기계식", "mechanical", "텐키리스", "무선", "rgb", "청축", "갈축", "적축"]
-                    if any(keyword in full_text for keyword in keyboard_check_keywords):
-                        relevant_count += 1
-                        
-                # 마우스 관련성 체크
-                elif any(k in keyword_lower for k in ["마우스", "mouse"]):
-                    mouse_check_keywords = ["마우스", "mouse", "게이밍", "gaming", "무선", "wireless", "dpi", "rgb", "로지텍", "razer"]
-                    if any(keyword in full_text for keyword in mouse_check_keywords):
-                        relevant_count += 1
-                
-                # 기타 일반적인 관련성 체크
-                else:
-                    # 키워드가 제품명이나 스펙에 포함되어 있으면 관련성 있음
-                    search_terms = keyword_lower.split()
-                    if any(term in full_text for term in search_terms if len(term) > 2):
-                        relevant_count += 1
-                        
-            except Exception as e:
-                self._dbg(f"Error checking relevance: {e}")
-                continue
-        
-        relevance_ratio = relevant_count / total_checked if total_checked > 0 else 0
-        self._dbg(f"Relevance check: {relevant_count}/{total_checked} = {relevance_ratio:.2f}")
-        
-        # HDD 검색의 경우 더 엄격한 기준 적용, 일반 검색은 기존 기준 유지
-        if any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
-            # HDD 검색: 40% 이상이면 관련성 있음 (실제 HDD 브랜드가 일부 포함되면 OK)
-            return relevance_ratio >= 0.4
-        else:
-            # 기타 검색: 50% 이상이 관련성 있으면 적절한 결과로 판단
-            return relevance_ratio >= 0.5
-    
     def _try_alternative_methods(self, keyword: str, order: str) -> Optional[BeautifulSoup]:
-        """다양한 방법으로 상품 데이터 가져오기 시도"""
+        """다양한 방법으로 상품 데이터 가져오기 시도 - POST 중심으로 최적화"""
         methods = [
-            ("POST list.php with computer parts filter", lambda: self._post_list(keyword, order, use_computer_parts_filter=True)),
-            ("POST list.php", lambda: self._post_list(keyword, order, use_computer_parts_filter=False)),
-            ("GET with params", lambda: self._get_with_params(keyword, order)),
-            ("Alternative URLs", lambda: self._try_alternative_urls(keyword, order))
+            ("POST list.php with category filter", lambda: self._post_list(keyword, order, use_computer_parts_filter=True)),
+            ("POST list.php without filter", lambda: self._post_list(keyword, order, use_computer_parts_filter=False)),
         ]
         
         for method_name, method_func in methods:
@@ -624,34 +270,27 @@ class GuidecomParser:
             except Exception as e:
                 self._dbg(f"Method {method_name} failed: {e}")
                 
+        # POST 방법이 실패한 경우만 GET 방법 시도 (fallback)
+        self._dbg("POST methods failed, trying GET fallback")
+        try:
+            return self._get_with_params(keyword, order)
+        except Exception as e:
+            self._dbg(f"GET fallback failed: {e}")
+            
         return None
     
     def _get_with_params(self, keyword: str, order: str) -> Optional[BeautifulSoup]:
-        """GET 요청으로 직접 가져오기"""
+        """GET 요청으로 직접 가져오기 (fallback용 - 실제로는 빈 템플릿만 반환)"""
         try:
             params = {"keyword": keyword, "order": order}
             resp = self._make_request(self.base_url, params=params)
             soup = BeautifulSoup(resp.text, "lxml")
+            # GET 방식은 템플릿만 반환하므로 실제 상품이 없음을 로그
+            self._dbg("GET method returned template page (no actual products)")
             return soup
         except Exception as e:
             self._dbg(f"GET with params failed: {e}")
             return None
-    
-    def _try_alternative_urls(self, keyword: str, order: str) -> Optional[BeautifulSoup]:
-        """대체 URL들 시도"""
-        for alt_url in self.alternative_urls:
-            try:
-                self._dbg(f"Trying alternative URL: {alt_url}")
-                params = {"keyword": keyword, "order": order, "q": keyword}
-                resp = self._make_request(alt_url, params=params)
-                soup = BeautifulSoup(resp.text, "lxml")
-                rows = soup.find_all("div", class_="goods-row")
-                if rows:
-                    self._dbg(f"Found {len(rows)} products in {alt_url}")
-                    return soup
-            except Exception as e:
-                self._dbg(f"Alternative URL {alt_url} failed: {e}")
-        return None
 
     # ----------------------- Parsing helpers -----------------------
     def _find_goods_list(self, soup: BeautifulSoup):
@@ -742,10 +381,52 @@ class GuidecomParser:
             ]
             
             name_el = None
+            product_link = ""
             for selector in name_selectors:
                 name_el = row.select_one(selector)
                 if name_el:
                     self._dbg(f"Found name with selector: {selector}")
+                    # 링크 URL 추출 - name_el이 링크가 아닌 경우 부모 또는 형제 요소에서 링크 찾기
+                    if name_el.get('href'):
+                        href = name_el.get('href')
+                        if href.startswith('/'):
+                            product_link = f"https://www.guidecom.co.kr{href}"
+                        elif href.startswith('http'):
+                            product_link = href
+                        else:
+                            product_link = f"https://www.guidecom.co.kr/{href}"
+                        self._dbg(f"Found link from name element: {product_link}")
+                    else:
+                        # name_el이 링크가 아닌 경우 (예: .goodsname1은 span), 부모나 형제에서 링크 찾기
+                        link_el = None
+                        # 1. 부모 요소가 링크인지 확인
+                        parent = name_el.parent
+                        if parent and parent.name == 'a' and parent.get('href'):
+                            link_el = parent
+                        else:
+                            # 2. 같은 row 내에서 링크 찾기
+                            link_selectors = [
+                                ".desc h4.title a",
+                                "h4.title a", 
+                                ".desc .title a",
+                                ".title a",
+                                ".desc a",
+                                "a"
+                            ]
+                            for link_selector in link_selectors:
+                                link_el = row.select_one(link_selector)
+                                if link_el and link_el.get('href'):
+                                    break
+                        
+                        if link_el and link_el.get('href'):
+                            href = link_el.get('href')
+                            if href.startswith('/'):
+                                product_link = f"https://www.guidecom.co.kr{href}"
+                            elif href.startswith('http'):
+                                product_link = href
+                            else:
+                                product_link = f"https://www.guidecom.co.kr/{href}"
+                            self._dbg(f"Found link from separate element: {product_link}")
                     break
                     
             name = self._extract_text(name_el)
@@ -828,7 +509,7 @@ class GuidecomParser:
                 self._dbg("=== PRICE NOT FOUND ===")
                 self._dbg(f"Available elements with 'price' in class: {[str(el)[:100] for el in row.find_all(class_=lambda x: x and 'price' in str(x).lower())]}")
                 
-            return Product(name=name, price=price or "가격 정보 없음", specifications=specs or "사양 정보 없음")
+            return Product(name=name, price=price or "가격 정보 없음", specifications=specs or "사양 정보 없음", product_link=product_link, site="가이드컴")
         except Exception as e:
             self._dbg(f"_parse_product_item exception: {e}")
             import traceback
@@ -949,78 +630,35 @@ class GuidecomParser:
             if man_norm in aliases and any(sel == canonical for sel in sel_norms):
                 return True
         return False
-    
-    def _is_peripheral_product(self, product: Product, keyword_lower: str) -> bool:
-        """HDD 검색 시 주변기기 제품인지 판단"""
-        if not any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
-            return False  # HDD 검색이 아니면 체크 안함
-            
-        product_text = f"{product.name} {product.specifications}".lower()
-        
-        # 주변기기 키워드 (더 포괄적으로)
-        peripheral_keywords = [
-            "케이스", "컨버터", "외장", "usb", "어댑터", "독", "dock", "enclosure",
-            "인클로저", "변환", "커넥터", "connector", "bridge", "브릿지",
-            "to", "ide", "usb3.0", "usb2.0", "usb3.1", "type-a", "type-c",
-            "멀티", "multi", "4bay", "베이", "스테이션", "station"
-        ]
-        
-        # 실제 HDD 브랜드
-        real_hdd_brands = [
-            "western digital", "wd", "seagate", "toshiba", "도시바", "hitachi"
-        ]
-        
-        has_peripheral = any(keyword in product_text for keyword in peripheral_keywords)
-        has_real_brand = any(brand in product_text for brand in real_hdd_brands)
-        
-        # 주변기기 키워드가 있고 실제 HDD 브랜드가 없으면 주변기기로 판정
-        if has_peripheral and not has_real_brand:
-            self._dbg(f"Peripheral product filtered: {product.name[:50]}")
-            return True
-            
-        return False
 
     # ----------------------- Public API -----------------------
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
         """
-        제조사 후보를 최대 8개까지 반환.
-        1) list.php POST 결과에서 우선 추출
-        2) 실패 시 검색 페이지(GET)에서 보조 추출
-        디버깅 출력:
-          - goods-row 개수
-          - 샘플 제품명들, 제품명->제조사 매핑 몇 개
+        제조사 후보를 최대 8개까지 반환 (POST 요청 최적화)
         """
         manufacturers: List[str] = []
         seen = set()
         try:
-            # 1) 다양한 방법으로 상품 데이터 가져오기 시도
-            soup = self._try_alternative_methods(keyword, "reco_goods")
-            
-            if not soup:
-                self._dbg("All methods failed, trying fallback approaches")
-                # 마지막 시도: 단순 GET 요청
-                try:
-                    params = {"keyword": keyword}
-                    resp = self._make_request(self.base_url, params=params)
-                    soup = BeautifulSoup(resp.text, "lxml")
-                except Exception as e:
-                    self._dbg(f"Fallback GET failed: {e}")
-                    return []
-                    
-            container = self._find_goods_list(soup) if soup else None
-            rows = container.find_all("div", class_="goods-row") if container else []
+            # 1) 카테고리 필터링 없이 직접 POST 요청 (더 많은 제조사 확보)
+            self._dbg("Getting manufacturers from POST request")
+            soup = self._post_list(keyword, "reco_goods", use_computer_parts_filter=False)
 
-            self._dbg(f"get_search_options: goods-row count={len(rows)}")
-            
-            # 디버그: HTML 구조 확인
-            if self.debug and soup:
-                self._dbg(f"=== SOUP CONTENT SAMPLE ===")
-                body_text = soup.get_text()[:1000] if soup.body else "No body found"
-                self._dbg(f"Body text sample: {body_text}")
-                
+            # 2) 실패 시 카테고리 필터링 시도
+            if not soup or not soup.find_all("div", class_="goods-row"):
+                self._dbg("Fallback to category filtered POST")
+                soup = self._post_list(keyword, "reco_goods", use_computer_parts_filter=True)
+
+            if not soup or not soup.find_all("div", class_="goods-row"):
+                self._dbg("All POST methods failed for get_search_options")
+                return []
+
+            rows = soup.find_all("div", class_="goods-row")
+            self._dbg(f"get_search_options: found {len(rows)} products")
+
             sample_names: List[str] = []
 
-            for idx, row in enumerate(rows[:80]):
+            # 더 많은 상품에서 제조사 추출 (100개까지)
+            for idx, row in enumerate(rows[:100]):
                 name_el = row.select_one(".desc .goodsname1") or row.select_one(".desc h4.title a") or row.select_one("h4.title a")
                 nm = self._extract_text(name_el)
                 if self.debug and idx < 10:
@@ -1029,6 +667,7 @@ class GuidecomParser:
                 if maker and maker not in seen:
                     manufacturers.append(maker)
                     seen.add(maker)
+                    self._dbg(f"Found manufacturer: {maker}")
                 if len(manufacturers) >= 8:
                     break
 
@@ -1081,9 +720,6 @@ class GuidecomParser:
                     continue
                 if not self._filter_by_maker(p, maker_codes):
                     continue
-                # HDD 검색 시 주변기기 제품 필터링
-                if self._is_peripheral_product(p, keyword.lower()):
-                    continue
                 out.append(p)
                 if len(out) >= limit:
                     break
@@ -1123,17 +759,23 @@ class GuidecomParser:
                 Product(
                     name="🔍 검색 결과가 없습니다",
                     price="안내", 
-                    specifications="다른 검색어로 시도해보세요. 예: SSD, 그래픽카드, 메모리, 메인보드 등"
+                    specifications="다른 검색어로 시도해보세요. 예: SSD, 그래픽카드, 메모리, 메인보드 등",
+                    product_link="",
+                    site="가이드컴"
                 ),
                 Product(
                     name="🌐 서버 연결 문제일 수 있습니다",
                     price="해결방법", 
-                    specifications="1) 잠시 후 다시 시도 2) 검색어를 단순하게 입력 3) 브랜드명 대신 제품 종류로 검색"
+                    specifications="1) 잠시 후 다시 시도 2) 검색어를 단순하게 입력 3) 브랜드명 대신 제품 종류로 검색",
+                    product_link="",
+                    site="가이드컴"
                 ),
                 Product(
                     name="📝 검색 팁",
                     price="도움말", 
-                    specifications="• '삼성 SSD' 대신 'SSD'로 검색 • 영문보다는 한글 검색어 권장 • 너무 구체적인 모델명보다는 일반적인 제품군으로 검색"
+                    specifications="• '삼성 SSD' 대신 'SSD'로 검색 • 영문보다는 한글 검색어 권장 • 너무 구체적인 모델명보다는 일반적인 제품군으로 검색",
+                    product_link="",
+                    site="가이드컴"
                 )
             ]
             

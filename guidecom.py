@@ -485,20 +485,51 @@ class GuidecomParser:
                     if any(keyword in full_text for keyword in gpu_check_keywords):
                         relevant_count += 1
                 
-                # HDD 관련성 체크
+                # HDD 관련성 체크 (더 엄격하게)
                 elif any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
-                    hdd_check_keywords = ["hdd", "하드디스크", "하드", "hard disk", "wd", "western digital", "seagate", "toshiba", "barracuda", "blue", "red", "tb", "gb"]
-                    exclude_keywords = ["케이스", "컨버터", "외장", "usb", "어댑터", "독", "dock", "ssd"]
+                    # 실제 HDD 브랜드와 모델 키워드
+                    real_hdd_keywords = [
+                        "western digital", "wd", "seagate", "toshiba", "도시바", "hitachi", 
+                        "barracuda", "blue", "red", "purple", "black", "gold", "ironwolf", "skyhawk",
+                        "ultrastar", "exos", "firecuda", "nas", "surveillance"
+                    ]
                     
-                    has_hdd_keyword = any(keyword in full_text for keyword in hdd_check_keywords)
-                    has_exclude_keyword = any(keyword in full_text for keyword in exclude_keywords)
+                    # HDD 기본 키워드
+                    basic_hdd_keywords = ["hdd", "하드디스크", "하드", "hard disk", "sata3", "rpm"]
                     
-                    if has_hdd_keyword and not has_exclude_keyword:
+                    # 주변기기/액세서리 키워드 (배제 대상)
+                    peripheral_keywords = [
+                        "케이스", "컨버터", "외장", "usb", "어댑터", "독", "dock", "enclosure",
+                        "인클로저", "변환", "커넥터", "connector", "bridge", "브릿지",
+                        "to", "ide", "usb3.0", "usb2.0", "type-a", "type-c"
+                    ]
+                    
+                    has_real_hdd = any(keyword in full_text for keyword in real_hdd_keywords)
+                    has_basic_hdd = any(keyword in full_text for keyword in basic_hdd_keywords)
+                    has_peripheral = any(keyword in full_text for keyword in peripheral_keywords)
+                    
+                    # 용량 정보 확인 (실제 HDD 용량 표기)
+                    capacity_keywords = ["tb", "테라", "tera", "gb", "기가"]
+                    has_capacity = any(keyword in full_text for keyword in capacity_keywords)
+                    
+                    # 엄격한 HDD 판정 기준
+                    if has_real_hdd and has_basic_hdd and not has_peripheral:
+                        # 확실한 HDD 브랜드 + HDD 키워드 + 주변기기 아님
                         relevant_count += 1
-                    elif has_hdd_keyword and has_exclude_keyword:
-                        # 주변기기 키워드가 있어도 실제 HDD 용량이 명시되어 있으면 관련성 있음
-                        if any(cap in full_text for cap in ["1tb", "2tb", "4tb", "8tb", "12tb", "16tb"]):
+                        self._dbg(f"HDD relevant: Real brand + HDD keywords, no peripheral")
+                    elif has_basic_hdd and has_capacity and not has_peripheral:
+                        # HDD 키워드 + 용량 정보 + 주변기기 아님 (단, 더 엄격하게)
+                        # 추가 조건: PC용, NAS용, CCTV용 등 용도 명시
+                        usage_keywords = ["pc용", "nas용", "cctv용", "desktop", "enterprise", "surveillance"]
+                        has_usage = any(keyword in full_text for keyword in usage_keywords)
+                        
+                        if has_usage:
                             relevant_count += 1
+                            self._dbg(f"HDD relevant: HDD + capacity + usage, no peripheral")
+                        else:
+                            self._dbg(f"HDD not relevant: Missing usage specification")
+                    else:
+                        self._dbg(f"HDD not relevant: has_real={has_real_hdd}, has_basic={has_basic_hdd}, has_peripheral={has_peripheral}")
                 
                 # SSD 관련성 체크
                 elif any(k in keyword_lower for k in ["ssd", "nvme", "m.2"]):
@@ -566,8 +597,13 @@ class GuidecomParser:
         relevance_ratio = relevant_count / total_checked if total_checked > 0 else 0
         self._dbg(f"Relevance check: {relevant_count}/{total_checked} = {relevance_ratio:.2f}")
         
-        # 50% 이상이 관련성 있으면 적절한 결과로 판단
-        return relevance_ratio >= 0.5
+        # HDD 검색의 경우 더 엄격한 기준 적용, 일반 검색은 기존 기준 유지
+        if any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
+            # HDD 검색: 40% 이상이면 관련성 있음 (실제 HDD 브랜드가 일부 포함되면 OK)
+            return relevance_ratio >= 0.4
+        else:
+            # 기타 검색: 50% 이상이 관련성 있으면 적절한 결과로 판단
+            return relevance_ratio >= 0.5
     
     def _try_alternative_methods(self, keyword: str, order: str) -> Optional[BeautifulSoup]:
         """다양한 방법으로 상품 데이터 가져오기 시도"""
@@ -913,6 +949,36 @@ class GuidecomParser:
             if man_norm in aliases and any(sel == canonical for sel in sel_norms):
                 return True
         return False
+    
+    def _is_peripheral_product(self, product: Product, keyword_lower: str) -> bool:
+        """HDD 검색 시 주변기기 제품인지 판단"""
+        if not any(k in keyword_lower for k in ["hdd", "하드디스크", "하드"]):
+            return False  # HDD 검색이 아니면 체크 안함
+            
+        product_text = f"{product.name} {product.specifications}".lower()
+        
+        # 주변기기 키워드 (더 포괄적으로)
+        peripheral_keywords = [
+            "케이스", "컨버터", "외장", "usb", "어댑터", "독", "dock", "enclosure",
+            "인클로저", "변환", "커넥터", "connector", "bridge", "브릿지",
+            "to", "ide", "usb3.0", "usb2.0", "usb3.1", "type-a", "type-c",
+            "멀티", "multi", "4bay", "베이", "스테이션", "station"
+        ]
+        
+        # 실제 HDD 브랜드
+        real_hdd_brands = [
+            "western digital", "wd", "seagate", "toshiba", "도시바", "hitachi"
+        ]
+        
+        has_peripheral = any(keyword in product_text for keyword in peripheral_keywords)
+        has_real_brand = any(brand in product_text for brand in real_hdd_brands)
+        
+        # 주변기기 키워드가 있고 실제 HDD 브랜드가 없으면 주변기기로 판정
+        if has_peripheral and not has_real_brand:
+            self._dbg(f"Peripheral product filtered: {product.name[:50]}")
+            return True
+            
+        return False
 
     # ----------------------- Public API -----------------------
     def get_search_options(self, keyword: str) -> List[Dict[str, str]]:
@@ -1014,6 +1080,9 @@ class GuidecomParser:
                 if not p:
                     continue
                 if not self._filter_by_maker(p, maker_codes):
+                    continue
+                # HDD 검색 시 주변기기 제품 필터링
+                if self._is_peripheral_product(p, keyword.lower()):
                     continue
                 out.append(p)
                 if len(out) >= limit:
